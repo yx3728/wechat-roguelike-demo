@@ -142,8 +142,8 @@ function createElite(level) {
     w: size,
     h: size,
     // 调整为更平滑的成长，避免二波血量离谱
-    hp: (5 + Math.floor(level * 0.7)) * 1000,
-    maxHp: (5 + Math.floor(level * 0.7)) * 1000,
+    hp: (50 + Math.floor(level * 0.7)) * 1000,
+    maxHp: (50 + Math.floor(level * 0.7)) * 1000,
     speed: 1.1 + level * 0.02,
     vx: 0,
     exp: 40,
@@ -162,7 +162,8 @@ function createElite(level) {
  * Boss：复杂招式驱动，由 bossAi.js 处理。
  * 这里只负责构造初始字段。
  */
-function createBoss(variant) {
+function createBoss(variant, level) {
+  const lv = Math.max(1, Math.floor(Number(level)) || 1);
   const size = 120;
   const bossVariant = variant || "crimson";
   const color = bossVariant === "azure" ? "#0ea5e9" : (bossVariant === "void" ? "#7c3aed" : "#dc2626");
@@ -173,10 +174,10 @@ function createBoss(variant) {
     y: -size - 10,
     w: size,
     h: size,
-    // 固定血量：不随等级成长
-    hp: 1920000,
-    maxHp: 1920000,
-    speed: 1.4,
+    // 随玩家等级微调血量（level 由 battle 传入 state.level）
+    hp: (192 + Math.floor(lv / 2)) * 100000,
+    maxHp: (192 + Math.floor(lv / 2)) * 100000,
+    speed: 3.4,
     targetY: 90,
     vx: 0,
     movePhase: 0,
@@ -206,7 +207,8 @@ function createBoss(variant) {
 }
 
 /** 虚空二阶段「本体」：更小、更快，由 bossAi updateBossVoidCore 驱动 */
-function createVoidCoreBoss(cx, cy) {
+function createVoidCoreBoss(cx, cy, level) {
+  const lv = Math.max(1, Math.floor(Number(level)) || 1);
   const size = 70;
   return {
     type: "boss",
@@ -215,9 +217,9 @@ function createVoidCoreBoss(cx, cy) {
     y: cy - size / 2,
     w: size,
     h: size,
-    hp: 2960000,
-    maxHp: 2960000,
-    speed: 3.76,
+    hp: (496 + Math.floor(lv / 2)) * 100000,
+    maxHp: (496 + Math.floor(lv / 2)) * 100000,
+    speed: 6.76,
     vx: 0,
     vy: 0,
     exp: 0,

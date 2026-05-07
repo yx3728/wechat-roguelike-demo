@@ -63,7 +63,7 @@ const CHARACTERS = [
     color: "#a78bfa",
     base: {
       maxHp: 1999,
-      bulletDamage: 600,
+      bulletDamage: 300,
       shootInterval: 380,
       sideBullets: 1,
       bulletPierceEnemies: false,
@@ -114,7 +114,7 @@ const CHARACTERS = [
   {
     id: "taffy",
     name: "永雏塔菲",
-    desc: "兑换码特典\n轻量机体",
+    desc: "金币获取率提升1000%\n无限重掷 每次未选的词条会被剔除",
     unlockCost: 0,
     unlockByCodeOnly: true,
     iconStyle: "taffyPortrait",
@@ -137,7 +137,7 @@ const CHARACTERS = [
     color: "#ffffff",
     base: {
       maxHp: 777,
-      bulletDamage: 277,
+      bulletDamage: 177,
       shootInterval: 430,
       sideBullets: 0,
       bulletPierceEnemies: false,

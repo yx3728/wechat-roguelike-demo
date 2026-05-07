@@ -120,6 +120,10 @@ function createMenuScene(options) {
       pickUpgradeIds: [],
       /** 仅「以调试启动」传入战斗：无伤（敌弹 / 撞击） */
       godMode: false,
+      /** 玩家炮弹与轨道卫星等对敌伤害至少清空当前生命值（虚空核心解锁前无效） */
+      oneHitKill: false,
+      /** 战斗逻辑时间缩放×10（与无敌/一击互不排斥） */
+      gameSpeed10x: false,
     },
   };
 
@@ -142,18 +146,16 @@ function createMenuScene(options) {
     { mode: "randomByLevel", label: "随机×等级" },
     { mode: "pickCards", label: "自选词条" },
   ];
-  const GOD_MODE_PRESETS = [
-    { god: false, label: "关" },
-    { god: true, label: "开" },
-  ];
   const FORCE_UPGRADE_ACTIONS = [
     { a: "off", label: "关闭" },
     { a: "pick", label: "菜单选取" },
   ];
+  /** 键必须与 tryRedeemByCode 一致：用户输入会 trim 并转成大写再查表 */
   const REDEEM_CODE_REWARDS = {
     // "WELCOME1000": { coins: 1000, msg: "欢迎礼包：+1000 金币" },
     // "ROGUELIKE2026": { coins: 2600, msg: "兑换成功：+2600 金币" },
     "114514": { coins: 114514, msg: "兑换成功：+114514 金币" },
+    THELONGUSERNAME: { coins: 27782778, msg: "兑换成功：+27782778 金币" },
     "7777777": { unlockCharacterId: "prism", msg: "已解锁角色：棱镜" },
     "TAFFY": { unlockCharacterId: "taffy", msg: "已解锁角色：永雏塔菲" },
   };
@@ -403,9 +405,13 @@ function createMenuScene(options) {
     const p = getSettingsPanelRect();
     return { x: p.x + 18, y: p.y + 132, w: p.w - 36, h: 40 };
   }
+  function getSettingsBattleTexturesRect() {
+    const p = getSettingsPanelRect();
+    return { x: p.x + 18, y: p.y + 178, w: p.w - 36, h: 40 };
+  }
   function getSettingsRedeemRect() {
     const p = getSettingsPanelRect();
-    return { x: p.x + 18, y: p.y + 184, w: p.w - 36, h: 42 };
+    return { x: p.x + 18, y: p.y + 226, w: p.w - 36, h: 42 };
   }
   function getSettingsCloseRect() {
     const p = getSettingsPanelRect();
@@ -602,11 +608,11 @@ function createMenuScene(options) {
       // 飞机图标（三角形，y 偏上 20px）
       const px = r.x + r.w / 2;
       const py = r.y + 20;
-      if (c.iconStyle === "strikerPortrait" && strikerMenuIconImg && strikerMenuIconReady) {
+      if (c.iconStyle === "strikerPortrait" && save.battleTexturesOn === true && strikerMenuIconImg && strikerMenuIconReady) {
         const iw = 36;
         const ih = 42;
         ctx.drawImage(strikerMenuIconImg, px - iw / 2, py - 5, iw, ih);
-      } else if (c.iconStyle === "taffyPortrait" && taffyMenuIconImg && taffyMenuIconReady) {
+      } else if (c.iconStyle === "taffyPortrait" && save.battleTexturesOn === true && taffyMenuIconImg && taffyMenuIconReady) {
         const iw = 34;
         const ih = 40;
         ctx.drawImage(taffyMenuIconImg, px - iw / 2, py - 4, iw, ih);
@@ -785,6 +791,7 @@ function createMenuScene(options) {
       const saveNow = storage.get();
       const musicOn = saveNow.musicOn !== false;
       const flashOn = saveNow.flashEffectsOn !== false;
+      const battleTexOn = saveNow.battleTexturesOn === true;
       const vol = saveNow.musicVolume == null ? 1 : saveNow.musicVolume;
       ctx.fillStyle = "rgba(2, 6, 23, 0.74)";
       ctx.fillRect(0, 0, W, H);
@@ -857,6 +864,31 @@ function createMenuScene(options) {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText("开启", flashToggleX + flashToggleW / 2, flashToggleY + flashToggleH / 2);
+
+      const texR = getSettingsBattleTexturesRect();
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(texR.x, texR.y, texR.w, texR.h);
+      ctx.strokeStyle = "#334155";
+      ctx.strokeRect(texR.x, texR.y, texR.w, texR.h);
+      ctx.fillStyle = "#e2e8f0";
+      ctx.font = "13px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText("战斗贴图", texR.x + 10, texR.y + texR.h / 2);
+      const texToggleW = 74;
+      const texToggleH = 28;
+      const texToggleX = texR.x + texR.w - texToggleW - 10;
+      const texToggleY = texR.y + (texR.h - texToggleH) / 2;
+      const texOff = !battleTexOn;
+      ctx.fillStyle = texOff ? "#334155" : "#1d4ed8";
+      ctx.fillRect(texToggleX, texToggleY, texToggleW, texToggleH);
+      ctx.strokeStyle = texOff ? "#475569" : "#60a5fa";
+      ctx.strokeRect(texToggleX, texToggleY, texToggleW, texToggleH);
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "bold 12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("开启", texToggleX + texToggleW / 2, texToggleY + texToggleH / 2);
 
       const rd = getSettingsRedeemRect();
       ctx.fillStyle = "#1e293b";
@@ -969,17 +1001,31 @@ function createMenuScene(options) {
       (item) => item.label
     );
 
-    // 无敌模式（仅调试启动一局内生效）
-    drawDevRow(
-      ctx,
-      "无敌模式",
-      ys.panel.x + 16,
-      ys.god - 22,
-      GOD_MODE_PRESETS,
-      ys.god,
-      (item) => state.debug.godMode === item.god,
-      (item) => item.label
-    );
+    // 本局调试：三张独立卡片，互不为排他选项（均仅「调试启动」时传入战斗）
+    ctx.fillStyle = "#cbd5e1";
+    ctx.font = "13px sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("本局调试", ys.panel.x + 16, ys.god - 22);
+    const devHudCards = [
+      { toggle: () => !!state.debug.godMode, label: "无敌模式" },
+      { toggle: () => !!state.debug.oneHitKill, label: "一击必杀" },
+      { toggle: () => !!state.debug.gameSpeed10x, label: "游戏十倍速" },
+    ];
+    devHudCards.forEach((card, i) => {
+      const r = devRowRect(ys.god, devHudCards.length, i);
+      const on = card.toggle();
+      ctx.fillStyle = on ? "#312e81" : "#1e293b";
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+      ctx.strokeStyle = on ? "#a78bfa" : "#334155";
+      ctx.lineWidth = on ? 2 : 1;
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.fillStyle = on ? "#e9d5ff" : "#94a3b8";
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(card.label, r.x + r.w / 2, r.y + r.h / 2);
+    });
 
     // 本局必出升级（仅保证“出现”一次，不强制自动选择）
     drawDevRow(
@@ -1184,6 +1230,10 @@ function createMenuScene(options) {
       storage.setFlashEffectsOn(!(save.flashEffectsOn !== false));
       return;
     }
+    if (pointInRect(t.x, t.y, getSettingsBattleTexturesRect())) {
+      storage.setBattleTexturesOn(!(save.battleTexturesOn === true));
+      return;
+    }
     if (pointInRect(t.x, t.y, getSettingsRedeemRect())) {
       if (typeof wx !== "undefined" && typeof wx.showModal === "function") {
         wx.showModal({
@@ -1378,13 +1428,14 @@ function createMenuScene(options) {
       return;
     }
 
-    // 无敌模式
-    for (let i = 0; i < GOD_MODE_PRESETS.length; i += 1) {
-      const r = devRowRect(ys.god, GOD_MODE_PRESETS.length, i);
-      if (pointInRect(t.x, t.y, r)) {
-        state.debug.godMode = GOD_MODE_PRESETS[i].god;
-        return;
-      }
+    // 本局调试：三卡各自开关
+    for (let i = 0; i < 3; i += 1) {
+      const r = devRowRect(ys.god, 3, i);
+      if (!pointInRect(t.x, t.y, r)) continue;
+      if (i === 0) state.debug.godMode = !state.debug.godMode;
+      else if (i === 1) state.debug.oneHitKill = !state.debug.oneHitKill;
+      else state.debug.gameSpeed10x = !state.debug.gameSpeed10x;
+      return;
     }
 
     // 本局必出升级
@@ -1472,6 +1523,8 @@ function createMenuScene(options) {
           upgradeStartMode: state.debug.upgradeStartMode,
           pickUpgradeIds: state.debug.pickUpgradeIds.slice(),
           godMode: !!state.debug.godMode,
+          oneHitKill: !!state.debug.oneHitKill,
+          gameSpeed10x: !!state.debug.gameSpeed10x,
         },
         extra || {},
       );

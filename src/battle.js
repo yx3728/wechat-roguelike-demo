@@ -51,6 +51,7 @@ const {
   RARITY_COLORS,
   UPGRADE_POOL,
   hasAnyUpgradeAvailable,
+  grantRunCoins,
 } = require("./upgrades.js");
 const { createItem } = require("./items.js");
 const { aggregateBonuses } = require("./talents.js");
@@ -303,6 +304,11 @@ function createBattleScene(options) {
     }
   }
 
+  /** 是否绘制战斗内可选贴图（敌人/破袭者/卫星等）；永雏塔菲立绘不受此开关影响 */
+  function battleTexturesEnabled() {
+    return storage.get().battleTexturesOn === true;
+  }
+
   // 把存档里的天赋等级转成战斗加成
   const save = storage.get();
   audio.setEnabled(save.musicOn !== false);
@@ -336,6 +342,8 @@ function createBattleScene(options) {
     magnetTimerMs: 0,                    // 磁吸道具剩余持续时间
     invincibleMs: 0,                     // 暂时无敌剩余时间（拾取 INV 道具后）
     godMode: false,                      // DEV 调试：本局无敌（不受敌弹/撞机伤害）
+    devOneHitKill: false,                 // DEV：伤害至少清空目标当前生命值（核心锁/Cutscene 除外）
+    devTimeScale: 1,                     // DEV：逻辑时间缩放（如 10 倍速）
 
     bossDropTimer: 0,                    // Boss 战中道具周期掉落计时
     bossDropNextMs: 6000,                // 距离下次 Boss 战道具掉落的随机间隔
@@ -349,6 +357,8 @@ function createBattleScene(options) {
     expToNext: 5,                        // 第一次升级所需经验：5（约 5 个绿球）
     kills: 0,
     coinsEarned: 0,                      // 本局已赚金币（结算时累加到存档）
+    /** 永雏塔菲：金币获取率 +1000% → 单笔金币×11（与角色描述一致） */
+    coinGainMul: character && character.id === "taffy" ? 11 : 1,
     wave3BossSpawned: false,
     hiddenVoidConsumed: false,           // 本局已触发过「满血击败红/蓝 → 虚空」则不再重复
     hiddenVoidStrobeMs: 0,               // 隐藏虚空入场全屏黑白闪剩余时间
@@ -466,6 +476,14 @@ function createBattleScene(options) {
     upgradeNextPanelPurplePlus: false,
     gameOver: false,
     win: false,                          // true=击败 Boss 胜利；false=死亡失败
+    /** 通关结算页：击败虚空 Boss 后出现「无尽模式」入口（仅该局为 true） */
+    offerEndlessAfterVoidWin: false,
+    /** 无尽接续：敌人生命/伤害随玩家等级指数放大（公式见 ENDLESS_*_EXP_BASE） */
+    endlessMode: false,
+    /** 无尽下每完成一整圈回到阶段一（击退主Boss链）计数；用于刷小怪频率 ×1.2^N */
+    endlessLapsCompleted: 0,
+    endlessEnemyHpMulCached: 1,
+    endlessEnemyDmgMulCached: 1,
     pauseRequested: false,
 
     // 当前主题（每波切换）
@@ -475,6 +493,9 @@ function createBattleScene(options) {
     themeBlendT: 1,                       // 0=from, 1=to
     themeBlendLeftMs: 0,                  // >0 时每帧推进 blend
   };
+
+  /** 本局经济是否已写入存档；无尽接续后清零以便再次结算 */
+  let runEconomySettled = false;
 
   /** 超限血条叠层上限（与 drawHud 中叠条数量一致）；实际 hp/maxHp 不可超过基准 + 此层数倍率 */
   const MAX_OVERFLOW_HP_LAYERS = 10;
@@ -568,13 +589,47 @@ function createBattleScene(options) {
     return best;
   }
 
+  /** 无尽模式：enemyHp ∝ BASE^(Lv-1)（略高于敌弹/撞伤放大，拉长局时） */
+  const ENDLESS_HP_EXP_BASE = 1.062;
+  /** 无尽模式：敌弹与撞机伤害 ∝ BASE^(Lv-1) */
+  const ENDLESS_DMG_EXP_BASE = 1.055;
+  /** 无尽：每完成一个轮回（回到阶段一）小怪刷新频率再上 20%（乘在 curse 与小怪计时除数上） */
+  const ENDLESS_LAP_SPAWN_MUL = 1.2;
+
+  function isVoidLineBoss(enemy) {
+    return !!enemy && (
+      enemy.isVoidCore
+      || enemy.bossVariant === "voidCore"
+      || enemy.bossVariant === "void"
+    );
+  }
+
+  function refreshEndlessScaling() {
+    if (!state.endlessMode) {
+      state.endlessEnemyHpMulCached = 1;
+      state.endlessEnemyDmgMulCached = 1;
+      return;
+    }
+    const L = Math.max(1, state.level);
+    state.endlessEnemyHpMulCached = Math.pow(ENDLESS_HP_EXP_BASE, L - 1);
+    state.endlessEnemyDmgMulCached = Math.pow(ENDLESS_DMG_EXP_BASE, L - 1);
+  }
+
   /** 诅咒天赋：提高敌机/Boss（含虚空核心）生命上限与当前血量 */
   function applyEnemyCurseHp(enemy) {
     if (!enemy) return;
     const m = state.curseEnemyHpMul;
-    if (m <= 1) return;
-    enemy.hp = Math.max(1, Math.floor(enemy.hp * m));
-    enemy.maxHp = Math.max(1, Math.floor(enemy.maxHp * m));
+    if (m > 1) {
+      enemy.hp = Math.max(1, Math.floor(enemy.hp * m));
+      enemy.maxHp = Math.max(1, Math.floor(enemy.maxHp * m));
+    }
+    if (state.endlessMode) {
+      const em = state.endlessEnemyHpMulCached || 1;
+      if (em > 1) {
+        enemy.hp = Math.max(1, Math.floor(enemy.hp * em));
+        enemy.maxHp = Math.max(1, Math.floor(enemy.maxHp * em));
+      }
+    }
   }
 
   /** Boss 分段血条：固定 5 层，每层 maxHp 的 1/5（须在 curse 缩放 hp/maxHp 之后调用） */
@@ -635,7 +690,7 @@ function createBattleScene(options) {
   /** 第三波主 Boss 仅红/蓝；虚空为隐藏 Boss（满血击败红/蓝后进入） */
   function spawnBoss() {
     const variant = forcedBossVariant || (Math.random() < 0.5 ? "azure" : "crimson");
-    const boss = createBoss(variant);
+    const boss = createBoss(variant, Math.max(1, state.level));
     applyEnemyCurseHp(boss);
     initBossSegmentedHpBar(boss);
     // Boss 基础血量在 enemies.js 定义；诅咒天赋在此处叠乘
@@ -660,6 +715,7 @@ function createBattleScene(options) {
     if (enemy.bossVariant === "void" && !enemy.phase2Triggered) return "voidPhase2";
     if (enemy.isVoidCore || enemy.bossVariant === "voidCore") return "win";
     if (enemy.bossVariant === "void") return "win";
+    /** 含无尽模式：满血击败红/蓝仍可进隐藏虚空，虚空线与核心击败后照旧回阶段一做周回 */
     if (
       (enemy.bossVariant === "crimson" || enemy.bossVariant === "azure")
       && playerHpFullForHiddenVoidGate()
@@ -677,7 +733,7 @@ function createBattleScene(options) {
     state.bullets = [];
     flashEnemyBulletClearIfAny();
     state.enemyBullets = [];
-    const boss = createBoss("void");
+    const boss = createBoss("void", Math.max(1, state.level));
     applyEnemyCurseHp(boss);
     initBossSegmentedHpBar(boss);
     boss.speed = 1.6;
@@ -689,6 +745,64 @@ function createBattleScene(options) {
     audio.stopAll();
     audio.playBossBgm();
     state.invincibleMs = Math.max(state.invincibleMs || 0, 1500);
+  }
+
+  /**
+   * 无尽用：清空场上单位与虚空演出，回到阶段1…
+   * @param completeRoundLap true=刚完成一整圈Boss链，小怪刷新频率再 ×1.2（叠乘）；false=仅切开无尽首跳
+   */
+  function performEndlessRoundResetToWave1(completeRoundLap) {
+    if (completeRoundLap && state.endlessMode) {
+      state.endlessLapsCompleted = (state.endlessLapsCompleted || 0) + 1;
+    }
+    refreshEndlessScaling();
+    state.waveIndex = 1;
+    state.waveTimeLeft = 0;
+    state.waveResting = false;
+    state.waveRestLeft = 0;
+    state.bossActive = false;
+    state.wave3BossSpawned = false;
+    state.hiddenVoidConsumed = false;
+    state.hiddenVoidStrobeMs = 0;
+    state.spawnTimer = 0;
+    state.elapsed = 0;
+    state.bossDropTimer = 0;
+
+    state.enemies = [];
+    state.bullets = [];
+    flashEnemyBulletClearIfAny();
+    state.enemyBullets = [];
+    state.items = [];
+
+    state.voidDarknessAlpha = 0;
+    state.voidSafeZone = null;
+    state.voidGravityTraps = [];
+    state.voidFragments = [];
+    state.voidFlashAlpha = 0;
+    state.voidPhase2PurpleAlpha = 0;
+    state.voidCoreUnlockAt = 0;
+    state.voidCoreCombatStartAt = null;
+    state.finalJudgementDangerMs = 0;
+    state.finalJudgementRushHangMs = 0;
+    state.finalJudgementPetalMs = 0;
+    state.finalJudgementPetalMotionDone = false;
+
+    state.bombFlashMs = 0;
+    applyTheme(true);
+    startWave();
+    audio.stopAll();
+    audio.playBgm();
+  }
+
+  /**
+   * 结算页点「无尽模式」：进入无尽周回（金币仍为整局一笔，仅死亡或回菜单/再来一局时 finishRun）。
+   */
+  function beginEndlessContinuation() {
+    state.gameOver = false;
+    state.win = false;
+    state.offerEndlessAfterVoidWin = false;
+    state.endlessMode = true;
+    performEndlessRoundResetToWave1(false);
   }
 
   /** Boss 召唤小怪：支持默认冲撞型与“左右柱状普通敌人”两种模式 */
@@ -703,13 +817,13 @@ function createBattleScene(options) {
         left.y = y;
         left.vx = 0;
         left.speed = Math.max(3.8, left.speed * 1.75);
-        left.noItemDrop = true; // 蓝 Boss 敌人柱不掉道具
+        left.noItemDrop = true; // 蓝 Boss 敌人柱：不掉经验球与道具
         const right = createGrunt(Math.max(1, state.level));
         right.x = W - right.w - 6;
         right.y = y - 10;
         right.vx = 0;
         right.speed = Math.max(3.8, right.speed * 1.75);
-        right.noItemDrop = true; // 蓝 Boss 敌人柱不掉道具
+        right.noItemDrop = true; // 同上
         applyEnemyCurseHp(left);
         applyEnemyCurseHp(right);
         state.enemies.push(left, right);
@@ -998,9 +1112,44 @@ function createBattleScene(options) {
     state.upgradeOptions = buildUpgradeOptions();
   }
 
+  /** 将当前三选一（或更少）面板上出现的进化词条标记为「错过」，本局不再进入候选池（补给类 isPostPoolReward 除外） */
+  function blockCurrentUpgradePanelAsUnpicked() {
+    const opts = state.upgradeOptions;
+    if (!opts || !opts.length) return;
+    if (!state._upgradeMeta) state._upgradeMeta = { picked: Object.create(null), blocked: Object.create(null) };
+    if (!state._upgradeMeta.blocked) state._upgradeMeta.blocked = Object.create(null);
+    for (let i = 0; i < opts.length; i += 1) {
+      const o = opts[i];
+      if (!o || !o.id || o.isPostPoolReward) continue;
+      state._upgradeMeta.blocked[o.id] = true;
+    }
+  }
+
+  /** 永雏塔菲：选定一条时，同屏其余进化词条视为未选并剔除（补给除外） */
+  function blockTaffyUnpickedSiblings(pickedIndex) {
+    if (state.characterId !== "taffy") return;
+    const opts = state.upgradeOptions;
+    if (!opts || !opts.length) return;
+    if (!state._upgradeMeta) state._upgradeMeta = { picked: Object.create(null), blocked: Object.create(null) };
+    if (!state._upgradeMeta.blocked) state._upgradeMeta.blocked = Object.create(null);
+    for (let i = 0; i < opts.length; i += 1) {
+      if (i === pickedIndex) continue;
+      const o = opts[i];
+      if (!o || !o.id || o.isPostPoolReward) continue;
+      state._upgradeMeta.blocked[o.id] = true;
+    }
+  }
+
   function rerollUpgradeOptions() {
     if (!state.pausedForUpgrade) return;
     if (!hasAnyUpgradeAvailable(state)) return;
+    // 永雏塔菲：重掷不消耗次数与金币；重掷前当前屏上所有进化词条均视为未选并剔除
+    if (state.characterId === "taffy") {
+      blockCurrentUpgradePanelAsUnpicked();
+      state.upgradePruneArmed = false;
+      state.upgradeOptions = buildUpgradeOptions();
+      return;
+    }
     if (state.upgradeRerollLeft > 0) {
       state.upgradeRerollLeft -= 1;
       state.upgradePruneArmed = false;
@@ -1054,6 +1203,7 @@ function createBattleScene(options) {
     const opt = state.upgradeOptions[index];
     if (!opt) return;
     state.upgradePruneArmed = false;
+    blockTaffyUnpickedSiblings(index);
     const hadTurncoatShield = !!state.turncoatShield;
     opt.apply(state);
     if (!hadTurncoatShield && state.turncoatShield) {
@@ -1100,6 +1250,8 @@ function createBattleScene(options) {
    *   d.upgradeStartMode    "none" | "randomByLevel" | "pickCards"
    *   d.pickUpgradeIds      自选词条 id 列表（仅 pickCards 时有效）
    *   d.godMode             true 时本局不受敌弹与撞机伤害（DEV）
+   *   d.oneHitKill          true 时主炮弹/卫星/反伤对敌伤害至少清空当前生命值（核心锁 Boss 演出期除外）（DEV）
+   *   d.gameSpeed10x        true 时本局逻辑时间×10（与 god / oneHit 可叠加）（DEV）
    *   d.startBossVariant    "random" | "crimson" | "azure" | "void" | "voidCore"（红/蓝/虚空仅起始阶段=Boss 时生效；voidCore = 直入虚空二阶段核心，与起始波次可叠加并由本段逻辑覆盖）
    *   d.forceUpgradeIds     本局必出升级 id 列表（每条保证至少出现一次）
    *   d.startVoidPhase2     true：同上核心战（兼容旧字段；菜单现用 startBossVariant=voidCore）
@@ -1109,6 +1261,8 @@ function createBattleScene(options) {
     if (!d) return;
 
     if (d.godMode) state.godMode = true;
+    if (d.oneHitKill) state.devOneHitKill = true;
+    state.devTimeScale = d.gameSpeed10x ? 10 : 1;
     if (d.startBossVariant === "crimson" || d.startBossVariant === "azure" || d.startBossVariant === "void") {
       forcedBossVariant = d.startBossVariant;
     } else {
@@ -1193,7 +1347,7 @@ function createBattleScene(options) {
       applyTheme(true);
       const cx = W / 2;
       const cy = H * 0.36;
-      const core = createVoidCoreBoss(cx, cy);
+      const core = createVoidCoreBoss(cx, cy, Math.max(1, state.level));
       applyEnemyCurseHp(core);
       initBossSegmentedHpBar(core);
       core.entered = true;
@@ -1266,7 +1420,7 @@ function createBattleScene(options) {
         name: "战利品",
         desc: "获得 500 金币",
         apply(s) {
-          s.coinsEarned = (s.coinsEarned || 0) + 500;
+          grantRunCoins(s, 500);
         },
       },
     ];
@@ -1302,23 +1456,25 @@ function createBattleScene(options) {
   // ==========================================================================
 
   /**
-   * 掉落经验球（必掉）：
+   * 掉落经验球（必掉，noItemDrop 除外）：
    *   普通敌机 → 70% 小绿球 / 30% 中蓝球
    *   精英敌机 → 60% 大紫球 / 40% 中蓝球
-   * 另外按 dropChance 额外掉一件道具（heart/bomb/magnet/coin）。
+   * 另外按 dropChance 额外掉一件道具（heart/bomb/magnet/coin）；noItemDrop 时整块跳过。
    */
   function dropLootFromEnemy(enemy) {
     const cx = enemy.x + enemy.w / 2;
     const cy = enemy.y + enemy.h / 2;
 
-    let expType;
-    if (enemy.isElite) {
-      // 精英经验整体上调约 20%：提高高价值经验球占比
-      expType = Math.random() < 0.85 ? "exp_large" : "exp_medium";
-    } else {
-      expType = Math.random() < 0.7 ? "exp_small" : "exp_medium";
+    if (!enemy.noItemDrop) {
+      let expType;
+      if (enemy.isElite) {
+        // 精英经验整体上调约 20%：提高高价值经验球占比
+        expType = Math.random() < 0.85 ? "exp_large" : "exp_medium";
+      } else {
+        expType = Math.random() < 0.7 ? "exp_small" : "exp_medium";
+      }
+      state.items.push(createItem(cx, cy, expType));
     }
-    state.items.push(createItem(cx, cy, expType));
 
     let dropChance = state.dropBase;
     if (enemy.noItemDrop) dropChance = 0;
@@ -1337,7 +1493,7 @@ function createBattleScene(options) {
 
   /** Boss 死亡：大量经验球 + 一些道具 */
   function dropBossLoot(enemy) {
-    state.coinsEarned += enemy && enemy.bossVariant === "azure" ? 1000 : 800;
+    grantRunCoins(state, enemy && enemy.bossVariant === "azure" ? 1000 : 800);
     const cx = enemy.x + enemy.w / 2;
     const cy = enemy.y + enemy.h / 2;
     // 8 颗橙色巨经验球
@@ -1383,7 +1539,7 @@ function createBattleScene(options) {
       // 磁吸道具：持续 5 秒
       state.magnetTimerMs = 5000;
     } else if (item.type === "coin") {
-      state.coinsEarned += 30;
+      grantRunCoins(state, 30);
     } else if (item.type === "levelup") {
       // 直接升一级：与经验条 / expMul 无关，拾取后本级进度清空为 0
       const prevNeed = state.expToNext;
@@ -1556,7 +1712,7 @@ function createBattleScene(options) {
         boss.voidPhase2CoreSpawned = true;
         const cx = boss.x + boss.w / 2;
         const cy = boss.y + boss.h / 2;
-        const coreBoss = createVoidCoreBoss(cx, cy);
+        const coreBoss = createVoidCoreBoss(cx, cy, Math.max(1, state.level));
         applyEnemyCurseHp(coreBoss);
         initBossSegmentedHpBar(coreBoss);
         state.enemies.push(coreBoss);
@@ -1669,6 +1825,13 @@ function createBattleScene(options) {
     return { x: W / 2 - w / 2, y: H / 2 + 90 + UI_SHIFT_Y, w, h };
   }
 
+  /** 胜利且击败虚空 Boss 时：底部红色「无尽模式」 */
+  function getEndlessRect() {
+    const w = 200;
+    const h = 48;
+    return { x: W / 2 - w / 2, y: H / 2 + 142 + UI_SHIFT_Y, w, h };
+  }
+
   /** 战斗中右上角"退出"按钮（HUD 中），56x30 */
   function getPauseRect() {
     return { x: W - 70, y: 30 + UI_SHIFT_Y, w: 56, h: 30 };
@@ -1745,10 +1908,12 @@ function createBattleScene(options) {
    *   4. 碰撞处理：玩家子弹↔敌机、玩家↔道具、玩家↔敌弹、玩家↔敌机
    */
   function update(delta) {
-    state.upgradePanelAnimMs += delta;
-    state.hiddenVoidStrobeMs = Math.max(0, (state.hiddenVoidStrobeMs || 0) - delta);
+    const dt =
+      delta * Math.max(0.25, Math.min(120, Number(state.devTimeScale) || 1));
+    state.upgradePanelAnimMs += dt;
+    state.hiddenVoidStrobeMs = Math.max(0, (state.hiddenVoidStrobeMs || 0) - dt);
     if (state.pausedForUpgrade && state.upgradePruneFx) {
-      state.upgradePruneFx.ms = Math.max(0, state.upgradePruneFx.ms - delta);
+      state.upgradePruneFx.ms = Math.max(0, state.upgradePruneFx.ms - dt);
       if (state.upgradePruneFx.ms <= 0) {
         state.upgradePruneFx = null;
         state.pausedForUpgrade = false;
@@ -1758,13 +1923,14 @@ function createBattleScene(options) {
     }
     if (state.gameOver || state.pausedForUpgrade) return;
 
-    state.elapsed += delta;
-    state.bombFlashMs = Math.max(0, state.bombFlashMs - delta);
-    state.magnetTimerMs = Math.max(0, state.magnetTimerMs - delta);
+    refreshEndlessScaling();
+    state.elapsed += dt;
+    state.bombFlashMs = Math.max(0, state.bombFlashMs - dt);
+    state.magnetTimerMs = Math.max(0, state.magnetTimerMs - dt);
 
     // ---------- 背景渐变推进 ----------
     if (state.themeBlendLeftMs > 0) {
-      state.themeBlendLeftMs = Math.max(0, state.themeBlendLeftMs - delta);
+      state.themeBlendLeftMs = Math.max(0, state.themeBlendLeftMs - dt);
       const total = 800;
       state.themeBlendT = 1 - state.themeBlendLeftMs / total;
     } else {
@@ -1775,9 +1941,12 @@ function createBattleScene(options) {
     if (state.waveIndex === 1 && state.elapsed >= WAVE2_START_MS) goWave2();
     if (state.waveIndex === 2 && state.elapsed >= WAVE3_START_MS) goWave3();
 
-    const spawnFreqMul = state.curseSpawnMul;
+    const endlessSpawnBoost = state.endlessMode
+      ? Math.pow(ENDLESS_LAP_SPAWN_MUL, Math.max(0, state.endlessLapsCompleted || 0))
+      : 1;
+    const spawnFreqMul = state.curseSpawnMul * endlessSpawnBoost;
     // ---------- 固定三波推进 ----------
-    state.spawnTimer += delta;
+    state.spawnTimer += dt;
     if (state.waveIndex === 1) {
       const spawnInterval = 900 / (spawnFreqMul * BASE_SPAWN_FREQ_BOOST);
       if (state.spawnTimer >= spawnInterval && state.enemies.length < 4) {
@@ -1811,7 +1980,7 @@ function createBattleScene(options) {
     }
 
     // ---------- 玩家自动射击 ----------
-    state.shootTimer += delta;
+    state.shootTimer += dt;
     if (state.shootTimer >= state.shootInterval) {
       state.shootTimer = 0;
       fireBullets();
@@ -1819,7 +1988,7 @@ function createBattleScene(options) {
 
     // ---------- 轨道卫星发射追踪弹 ----------
     if (state.satelliteCount > 0 && state.enemies.length > 0) {
-      state.satelliteShotCooldownMs -= delta;
+      state.satelliteShotCooldownMs -= dt;
       if (state.satelliteShotCooldownMs <= 0) {
         state.satelliteShotCooldownMs = state.satelliteShotIntervalMs;
         const p = state.player;
@@ -1863,7 +2032,7 @@ function createBattleScene(options) {
 
     // ---------- 自动回血 ----------
     if (state.hasRegen) {
-      state.regenTimer += delta;
+      state.regenTimer += dt;
       if (state.regenTimer >= state.regenIntervalMs) {
         state.regenTimer = 0;
         healPlayer(Math.max(1, state.baseMaxHp) * state.regenHealRatio);
@@ -1874,15 +2043,15 @@ function createBattleScene(options) {
     if (state.shieldMaxHp > 0 && state.shieldHp < state.shieldMaxHp && state.shieldRegenPerSec > 0) {
       state.shieldHp = Math.min(
         state.shieldMaxHp,
-        state.shieldHp + state.shieldMaxHp * state.shieldRegenPerSec * (delta / 1000)
+        state.shieldHp + state.shieldMaxHp * state.shieldRegenPerSec * (dt / 1000)
       );
     }
-    state.shieldFlashMs = Math.max(0, state.shieldFlashMs - delta);
-    state.invincibleMs = Math.max(0, state.invincibleMs - delta);
+    state.shieldFlashMs = Math.max(0, state.shieldFlashMs - dt);
+    state.invincibleMs = Math.max(0, state.invincibleMs - dt);
 
     // ---------- 反间护盾 ----------
     if (state.turncoatShield) {
-      state.turncoatShieldAccMs += delta;
+      state.turncoatShieldAccMs += dt;
       while (state.turncoatShieldAccMs >= TURNCOAT_SHIELD_INTERVAL_MS) {
         state.turncoatShieldAccMs -= TURNCOAT_SHIELD_INTERVAL_MS;
         procTurncoatShield();
@@ -1891,7 +2060,7 @@ function createBattleScene(options) {
 
     // ---------- Boss 战中周期性随机掉落道具（包括 LV+ / INV / 普通道具） ----------
     if (state.bossActive && state.wave3BossSpawned) {
-      state.bossDropTimer += delta;
+      state.bossDropTimer += dt;
       if (state.bossDropTimer >= state.bossDropNextMs) {
         state.bossDropTimer = 0;
         state.bossDropNextMs = 7000 + Math.floor(Math.random() * 6000); // 7~13s 随机
@@ -1950,7 +2119,7 @@ function createBattleScene(options) {
         enemy.y = owner.y + (owner.h - enemy.h) * 0.5;
         enemy.spinAngle = owner.spinAngle || 0;
         if (typeof enemy.mirrorIntroMsRemain === "number" && enemy.mirrorIntroMsRemain > 0) {
-          enemy.mirrorIntroMsRemain = Math.max(0, enemy.mirrorIntroMsRemain - delta);
+          enemy.mirrorIntroMsRemain = Math.max(0, enemy.mirrorIntroMsRemain - dt);
         }
         return;
       }
@@ -1958,14 +2127,14 @@ function createBattleScene(options) {
         if (enemy.inCutscene) {
           const prevX = enemy.x;
           const prevY = enemy.y;
-          updateVoidCutscene(enemy, delta);
+          updateVoidCutscene(enemy, dt);
           applyTimeflowEnemyDisplacementSlow(state, enemy, prevX, prevY);
         } else {
           const prevX = enemy.x;
           const prevY = enemy.y;
           getUpdateBoss()(
             enemy,
-            delta,
+            dt,
             state,
             (b) => {
               state.enemyBullets.push(
@@ -1977,12 +2146,12 @@ function createBattleScene(options) {
           applyTimeflowEnemyDisplacementSlow(state, enemy, prevX, prevY);
           const moved = Math.hypot(enemy.x - prevX, enemy.y - prevY);
           if (typeof enemy.spinAngle !== "number") enemy.spinAngle = 0;
-          enemy.spinAngle += delta * 0.0018 + moved * 0.03;
+          enemy.spinAngle += dt * 0.0018 + moved * 0.03;
         }
       } else {
         const prevX = enemy.x;
         const prevY = enemy.y;
-        updateEnemy(enemy, delta, state);
+        updateEnemy(enemy, dt, state);
         applyTimeflowEnemyDisplacementSlow(state, enemy, prevX, prevY);
         const pushEnemyBullet = (b) => {
           state.enemyBullets.push(
@@ -1991,7 +2160,7 @@ function createBattleScene(options) {
         };
 
         // 原有：射手/精英的开火逻辑
-        maybeFire(enemy, delta, state, pushEnemyBullet);
+        maybeFire(enemy, dt, state, pushEnemyBullet);
 
         // 新增：30 秒后，普通敌人（非精英、非射手）也会单发射击
         const isNormalEnemy = !enemy.isElite && enemy.type !== "shooter";
@@ -1999,7 +2168,7 @@ function createBattleScene(options) {
           if (typeof enemy.normalFireCooldown !== "number") {
             enemy.normalFireCooldown = 1000 + Math.random() * 800;
           }
-          enemy.normalFireCooldown -= delta;
+          enemy.normalFireCooldown -= dt;
           if (enemy.normalFireCooldown <= 0 && enemy.y >= 40) {
             enemy.normalFireCooldown = 2200 + Math.random() * 900;
             const cx = enemy.x + enemy.w / 2;
@@ -2027,14 +2196,14 @@ function createBattleScene(options) {
 
     const prevHang = state.finalJudgementRushHangMs || 0;
     if (prevHang > 0) {
-      state.finalJudgementRushHangMs = Math.max(0, prevHang - delta);
+      state.finalJudgementRushHangMs = Math.max(0, prevHang - dt);
       if (prevHang > 0 && state.finalJudgementRushHangMs <= 0) {
         armVoidJudgementRushBullets(state);
       }
     }
 
     if ((state.finalJudgementDangerMs || 0) > 0) {
-      state.finalJudgementDangerMs = Math.max(0, state.finalJudgementDangerMs - delta);
+      state.finalJudgementDangerMs = Math.max(0, state.finalJudgementDangerMs - dt);
     }
 
     const petalEligible =
@@ -2046,7 +2215,7 @@ function createBattleScene(options) {
 
     if (petalEligible) state.finalJudgementPetalMotionDone = false;
     const prevPetal = state.finalJudgementPetalMs;
-    if (state.finalJudgementPetalMs > 0) state.finalJudgementPetalMs = Math.max(0, state.finalJudgementPetalMs - delta);
+    if (state.finalJudgementPetalMs > 0) state.finalJudgementPetalMs = Math.max(0, state.finalJudgementPetalMs - dt);
 
     const startPetalBurst =
       judgementBoltRemain
@@ -2072,12 +2241,12 @@ function createBattleScene(options) {
           b._ph = b.h;
         });
       }
-      const frNorm = delta / 16;
+      const frNorm = dt / 16;
       state.enemyBullets.forEach((b) => {
         if (!b || !b.judgementBolt || state.finalJudgementDangerMs > 0) return;
         b.vy += 0.045 * frNorm;
-        b.vx *= 1 - Math.min(0.11, delta * 0.000065);
-        b.vy *= 1 - Math.min(0.07, delta * 0.000045);
+        b.vx *= 1 - Math.min(0.11, dt * 0.000065);
+        b.vy *= 1 - Math.min(0.07, dt * 0.000045);
         b._petalAng = (b._petalAng || 0) + (b._petalSpin || 0) * frNorm * 1.05;
       });
     }
@@ -2248,6 +2417,9 @@ function createBattleScene(options) {
         }
         if (enemy.isBoss) dmg = Math.max(1, Math.floor(dmg * state.bossDmgMul));
         else if (enemy.isElite) dmg = Math.max(1, Math.floor(dmg * state.eliteDmgMul));
+        if (state.devOneHitKill && !voidCoreLocked && !enemy.inCutscene) {
+          dmg = Math.max(dmg, Math.max(enemy.hp, 1));
+        }
 
         const hpBefore = enemy.hp;
         if (!voidCoreLocked) {
@@ -2291,9 +2463,14 @@ function createBattleScene(options) {
               state.kills += 1;
               dropBossLoot(enemy);
               state.enemies.splice(ei, 1);
-              state.win = true;
-              state.gameOver = true;
-              finishRun();
+              if (state.endlessMode) {
+                performEndlessRoundResetToWave1(true);
+              } else {
+                state.offerEndlessAfterVoidWin = isVoidLineBoss(enemy);
+                state.win = true;
+                state.gameOver = true;
+                if (!state.offerEndlessAfterVoidWin) finishRun();
+              }
             }
           } else {
             state.enemies.splice(ei, 1);
@@ -2338,9 +2515,12 @@ function createBattleScene(options) {
         if (enemy.isBoss && enemy.inCutscene) continue;
         const voidCoreLocked = enemy.isVoidCore && state.elapsed < (state.voidCoreUnlockAt || 0);
         if (voidCoreLocked) continue;
-        let dmg = overlapCount * state.satelliteDamagePerSec * (delta / 1000);
+        let dmg = overlapCount * state.satelliteDamagePerSec * (dt / 1000);
         if (enemy.isBoss) dmg *= state.bossDmgMul;
         else if (enemy.isElite) dmg *= state.eliteDmgMul;
+        if (state.devOneHitKill && !enemy.inCutscene) {
+          dmg = Math.max(dmg, Math.max(enemy.hp, 1));
+        }
         const hpBeforeSat = enemy.hp;
         enemy.hp -= dmg;
         if (enemy.isBoss && !enemy.isMirror) notifyBossSegmentLayerBreak(enemy, hpBeforeSat);
@@ -2370,9 +2550,14 @@ function createBattleScene(options) {
             state.kills += 1;
             dropBossLoot(enemy);
             state.enemies.splice(ei, 1);
-            state.win = true;
-            state.gameOver = true;
-            finishRun();
+            if (state.endlessMode) {
+              performEndlessRoundResetToWave1(true);
+            } else {
+              state.offerEndlessAfterVoidWin = isVoidLineBoss(enemy);
+              state.win = true;
+              state.gameOver = true;
+              if (!state.offerEndlessAfterVoidWin) finishRun();
+            }
             return;
           }
           state.enemies.splice(ei, 1);
@@ -2412,8 +2597,14 @@ function createBattleScene(options) {
       if (state.invincibleMs > 0 || state.godMode) continue;
 
       const rawBdmg = b.dmg || 0;
-      const incomingBulletDmg =
+      let incomingBulletDmg =
         rawBdmg <= 0 ? 0 : Math.max(1, Math.round(rawBdmg * state.curseEnemyDmgMul));
+      if (state.endlessMode && incomingBulletDmg > 0) {
+        incomingBulletDmg = Math.max(
+          1,
+          Math.round(incomingBulletDmg * (state.endlessEnemyDmgMulCached || 1)),
+        );
+      }
 
       // 无伤弹（仅占位/演出）不参与扣护盾与生命
       if (incomingBulletDmg <= 0) continue;
@@ -2444,11 +2635,24 @@ function createBattleScene(options) {
       if (enemy.isBoss && enemy.inCutscene) continue;
       if (enemy.isVoidCore && state.elapsed < (state.voidCoreUnlockAt || 0)) continue;
       const baseContactDmg = enemy.isBoss ? 6000 : (enemy.isElite ? 4000 : 2000);
-      const incomingContactDmg = Math.max(1, Math.round(baseContactDmg * state.curseEnemyDmgMul));
+      let incomingContactDmg = Math.max(1, Math.round(baseContactDmg * state.curseEnemyDmgMul));
+      if (state.endlessMode) {
+        incomingContactDmg = Math.max(
+          1,
+          Math.round(incomingContactDmg * (state.endlessEnemyDmgMulCached || 1)),
+        );
+      }
 
       // 反伤：按“实际受到的撞击伤害”比例反弹（不击杀 Boss 但能扣血）
       if (state.thornReflectRate > 0) {
-        const reflect = Math.max(1, Math.round(incomingContactDmg * state.thornReflectRate));
+        let reflect = Math.max(1, Math.round(incomingContactDmg * state.thornReflectRate));
+        if (
+          state.devOneHitKill
+          && !(enemy.isVoidCore && state.elapsed < (state.voidCoreUnlockAt || 0))
+          && !enemy.inCutscene
+        ) {
+          reflect = Math.max(reflect, Math.max(enemy.hp, 1));
+        }
         const hpThorn = enemy.hp;
         enemy.hp -= reflect;
         if (enemy.isBoss && !enemy.isMirror) notifyBossSegmentLayerBreak(enemy, hpThorn);
@@ -2468,9 +2672,14 @@ function createBattleScene(options) {
           state.kills += 1;
           dropBossLoot(enemy);
           state.enemies.splice(i, 1);
-          state.win = true;
-          state.gameOver = true;
-          finishRun();
+          if (state.endlessMode) {
+            performEndlessRoundResetToWave1(true);
+          } else {
+            state.offerEndlessAfterVoidWin = isVoidLineBoss(enemy);
+            state.win = true;
+            state.gameOver = true;
+            if (!state.offerEndlessAfterVoidWin) finishRun();
+          }
           return;
         }
         if (enemy.hp <= 0 && !enemy.isBoss) {
@@ -2511,10 +2720,9 @@ function createBattleScene(options) {
   //  结算（仅触发一次：写入金币和最佳记录）
   // ==========================================================================
 
-  let runFinished = false;
   function finishRun() {
-    if (runFinished) return;
-    runFinished = true;
+    if (runEconomySettled) return;
+    runEconomySettled = true;
     storage.addCoins(state.coinsEarned);
     storage.recordRun(state.kills, state.level);
   }
@@ -2647,7 +2855,7 @@ function createBattleScene(options) {
       ctx.fill();
     }
 
-    if (state.characterId === "striker" && strikerPlayerImg && strikerPlayerImgReady) {
+    if (state.characterId === "striker" && battleTexturesEnabled() && strikerPlayerImg && strikerPlayerImgReady) {
       // 仅视觉放大，碰撞盒仍为 p.w × p.h；想改大小改 STRIKER_TEX_SCALE
       const STRIKER_TEX_SCALE = 2.8;
       const drawW = p.w * STRIKER_TEX_SCALE;
@@ -2842,7 +3050,7 @@ function createBattleScene(options) {
         ctx.fill();
         ctx.restore();
       } else if (enemy.isElite) {
-        if (eliteEnemyImg && eliteEnemyImgReady) {
+        if (battleTexturesEnabled() && eliteEnemyImg && eliteEnemyImgReady) {
           const drawW = enemy.w * ELITE_TEX_SCALE;
           const drawH = enemy.h * ELITE_TEX_SCALE;
           ctx.drawImage(eliteEnemyImg, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
@@ -2858,7 +3066,7 @@ function createBattleScene(options) {
         }
       } else {
         // 普通：倒三角（尖朝下）
-        if (enemy.type === "grunt" && normalEnemyImg && normalEnemyImgReady) {
+        if (enemy.type === "grunt" && battleTexturesEnabled() && normalEnemyImg && normalEnemyImgReady) {
           // 普通敌人贴图显示缩放倍数（仅视觉大小，不影响碰撞体积）
           // 想调大小就改这里：2 = 两倍，3 = 三倍，4 = 四倍
           const drawW = enemy.w * 3;
@@ -2928,9 +3136,9 @@ function createBattleScene(options) {
         // 想往上挪：改成 enemy.y - enemy.h - N（N 越大越靠上）
         // 精英血条：对齐「贴图视觉顶部」略上一点（勿再用 enemy.h*scale 顶到屏外）
         let hpBarY = enemy.y;
-        if (enemy.type === "grunt" && normalEnemyImg && normalEnemyImgReady) {
+        if (enemy.type === "grunt" && battleTexturesEnabled() && normalEnemyImg && normalEnemyImgReady) {
           hpBarY = enemy.y - enemy.h + 20;
-        } else if (enemy.isElite && eliteEnemyImg && eliteEnemyImgReady) {
+        } else if (enemy.isElite && battleTexturesEnabled() && eliteEnemyImg && eliteEnemyImgReady) {
           const eliteVisTop = cy - (enemy.h * ELITE_TEX_SCALE) / 2;
           hpBarY = eliteVisTop + 60;
         }
@@ -2956,10 +3164,10 @@ function createBattleScene(options) {
         const ang = state.elapsed * state.satelliteOrbitSpeed + i * step;
         const sx = cx + Math.cos(ang) * state.satelliteOrbitRadius;
         const sy = cy + Math.sin(ang) * state.satelliteOrbitRadius;
-        if (state.characterId === "vampire" && vampireSatelliteImg && vampireSatelliteImgReady) {
+        if (state.characterId === "vampire" && battleTexturesEnabled() && vampireSatelliteImg && vampireSatelliteImgReady) {
           const size = Math.max(18, state.satelliteRadius * 3.2);
           ctx.drawImage(vampireSatelliteImg, sx - size / 2, sy - size / 2, size, size);
-        } else if (orbitSatelliteImg && orbitSatelliteImgReady) {
+        } else if (battleTexturesEnabled() && orbitSatelliteImg && orbitSatelliteImgReady) {
           const size = Math.max(40, state.satelliteRadius * 10);
           ctx.save();
           ctx.translate(sx, sy);
@@ -3048,7 +3256,14 @@ function createBattleScene(options) {
     ctx.textAlign = "left";
 
     const timerText = formatElapsed(state.elapsed);
-    ctx.fillText(`Lv.${state.level}  击杀 ${state.kills}  金币 ${state.coinsEarned}  时间 ${timerText}`, 20, 18 + UI_SHIFT_Y);
+    const endlessTag = state.endlessMode
+      ? ` ·无尽${(state.endlessLapsCompleted || 0) > 0 ? `·轮回×${state.endlessLapsCompleted}` : ""}`
+      : "";
+    ctx.fillText(
+      `Lv.${state.level}${endlessTag}  击杀 ${state.kills}  金币 ${state.coinsEarned}  时间 ${timerText}`,
+      20,
+      18 + UI_SHIFT_Y,
+    );
 
     // 真实经验条：state.exp / state.expToNext
     const expProgress = Math.max(0, Math.min(1, state.exp / Math.max(1, state.expToNext)));
@@ -3255,7 +3470,7 @@ function createBattleScene(options) {
     });
 
     const rr = getUpgradeRerollRect();
-    const canFree = state.upgradeRerollLeft > 0;
+    const canFree = state.upgradeRerollLeft > 0 || state.characterId === "taffy";
     const paidIdx = state.upgradePaidRerollsUsed || 0;
     const nextCost =
       !canFree && paidIdx < UPGRADE_PAID_REROLL_MAX
@@ -3350,6 +3565,20 @@ function createBattleScene(options) {
     ctx.fillStyle = "#fff";
     ctx.font = "14px sans-serif";
     ctx.fillText("回到菜单", W / 2, me.y + me.h / 2);
+
+    if (state.win && state.offerEndlessAfterVoidWin) {
+      const eg = getEndlessRect();
+      ctx.fillStyle = "#b91c1c";
+      ctx.fillRect(eg.x, eg.y, eg.w, eg.h);
+      ctx.strokeStyle = "#fecaca";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(eg.x, eg.y, eg.w, eg.h);
+      ctx.fillStyle = "#fef2f2";
+      ctx.font = "bold 15px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("无尽模式", eg.x + eg.w / 2, eg.y + eg.h / 2);
+    }
   }
 
   /** 炸弹爆炸时的全屏黄色闪光（透明度从 0.6 衰减到 0） */
@@ -3415,8 +3644,13 @@ function createBattleScene(options) {
   function onTouchStart(t) {
     if (state.gameOver) {
       if (pointInRect(t.x, t.y, getRestartRect())) {
+        finishRun();
         onExit({ restart: true, character });
+      } else if (state.win && state.offerEndlessAfterVoidWin && pointInRect(t.x, t.y, getEndlessRect())) {
+        /** 不进 finishRun：无尽周回金币与最佳记录仅在死亡或退回菜单/再来一局时结算 */
+        beginEndlessContinuation();
       } else if (pointInRect(t.x, t.y, getMenuRect())) {
+        finishRun();
         onExit({ restart: false });
       }
       return;

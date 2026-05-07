@@ -55,6 +55,15 @@ function isPicked(s, id) { return !!ensureMeta(s).picked[id]; }
 function isBlocked(s, id) { return !!ensureMeta(s).blocked[id]; }
 function markPicked(s, id) { ensureMeta(s).picked[id] = true; }
 
+/** 按局内 coinGainMul 增加本局金币（如永雏塔菲 +1000% → 11×） */
+function grantRunCoins(s, base) {
+  const n = Math.floor(Number(base));
+  if (!s || !Number.isFinite(n) || n <= 0) return;
+  const raw = Number(s.coinGainMul);
+  const mul = Number.isFinite(raw) && raw > 0 ? raw : 1;
+  s.coinsEarned = (s.coinsEarned || 0) + Math.floor(n * mul);
+}
+
 /** 机械师出生即有 2 颗卫星等价于已拥有「轨道卫星」基础效果，可直接解锁「轨道卫星II」 prerequisite */
 function hasMechanicStarterSatellites(s) {
   return s.characterId === "mechanic"
@@ -140,7 +149,7 @@ const UPGRADE_POOL = [
       s.satelliteCount = (s.satelliteCount || 0) * 2;
       s.satelliteBreakBullets = true;
     }, "sat_orbit"),
-  entry("purple", "bullet_crush", "无坚不摧",   "你的子弹能够摧毁敌方弹幕",
+  entry("orange", "bullet_crush", "无坚不摧",   "你的子弹能够摧毁敌方弹幕",
     (s) => { s.bulletBreakBullets = true; }),
 
   // ---------- 弹道类 ----------
@@ -276,9 +285,9 @@ const UPGRADE_POOL = [
   entry("blue",   "drop_basic", "战利品雷达",   "精英敌人必定掉落道具",
     (s) => { s.eliteGuaranteedDrop = true; }),
   entry("green",  "coin_small", "赏金协议",     "立即获得 150 金币",
-    (s) => { s.coinsEarned += 150; }),
+    (s) => { grantRunCoins(s, 150); }),
   entry("blue", "coin_big",   "赏金协议II",   "立即获得 400 金币",
-    (s) => { s.coinsEarned += 400; }, "coin_small"),
+    (s) => { grantRunCoins(s, 400); }, "coin_small"),
 
   // ---------- 击杀效果类 ----------
   entry("blue",   "kill_blood",  "鲜血学者",     "吸血 +1%",
@@ -304,7 +313,7 @@ const UPGRADE_POOL = [
   entry("purple", "mix_vulcan",   "火控协同II", "伤害 +16%、射速 +30%",
     (s) => { s.bulletDamage *= 1.16; applyFireRateMul(s, 1.3); }, "mix_fire"),
   entry("green",   "mix_econ",     "战地经济学", "立即获得 200 金币、道具掉落率 +15%",
-    (s) => { s.coinsEarned += 200; s.dropBase += 0.15; }),
+    (s) => { grantRunCoins(s, 200); s.dropBase += 0.15; }),
   entry("purple", "mix_terminal", "终端优化",   "伤害 +15%、暴击率 +25%",
     (s) => { s.bulletDamage *= 1.15; addCritRateWithOverflow(s, 0.25); }),
   entry("orange", "mix_perfect",  "完美机师",   "获得全属性提升",
@@ -317,13 +326,14 @@ const UPGRADE_POOL = [
       s.dropBase += 0.25;
       s.expMul += 0.35;
     }),
-  entry("orange", "mix_ascend",   "神格降临",   "伤害 -50%、射速 +1000%\n最大HP +50%、吸血 +1%",
+  // entry("orange", "mix_ascend",   "神格降临",   "伤害 -50%、射速 +1000%\n最大HP +50%、吸血 +1%",
+  entry("orange", "mix_ascend",   "神格降临",   "伤害 -50%、射速 +1000%",
     (s) => {
       s.shootIntervalFloor = Math.min(getShootIntervalFloor(s), 30);
       s.bulletDamage *= 0.5;
       applyFireRateMul(s, 10);
-      s.maxHp *= 1.5;
-      s.vampRate += 0.01;
+      // s.maxHp *= 1.5;
+      // s.vampRate += 0.01;
     }),
   entry("orange", "bullet_void", "虚空收割者", "弹道额外 +6，暴击率固定为95%\n但子弹伤害与射速均降低30%",
     (s) => {
@@ -379,6 +389,7 @@ module.exports = {
   UPGRADE_POOL,
   pickUpgrades,
   hasAnyUpgradeAvailable,
+  grantRunCoins,
 };
 
 

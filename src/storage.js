@@ -50,6 +50,8 @@ const DEFAULT_SAVE = {
   musicVolume: 1,
   /** 闪光特效开关（true=开） */
   flashEffectsOn: true,
+  /** 战斗内非必要贴图（敌人/破袭者机体/轨道与吸血鬼卫星等）；默认关，用几何体；永雏塔菲无几何立绘时仍用贴图 */
+  battleTexturesOn: false,
   /** 已兑换兑换码（防止重复领取） */
   redeemedCodes: {},
   /** 菜单默认选中的角色 id（用于记住上局选择） */
@@ -138,6 +140,12 @@ module.exports = {
   /** 闪光特效开关（持久化） */
   setFlashEffectsOn(on) {
     cache.flashEffectsOn = !!on;
+    save(cache);
+  },
+
+  /** 战斗内装饰贴图开关（持久化）；关时敌人等有几何回退的用形状绘制 */
+  setBattleTexturesOn(on) {
+    cache.battleTexturesOn = !!on;
     save(cache);
   },
 
