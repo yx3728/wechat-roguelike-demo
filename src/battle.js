@@ -80,7 +80,7 @@ const { grassDamageTakenMul } = require("./grasslandEnemies.js");
 const { drawHellBackground, drawHellEnemy, drawHellBoss, drawHellOverlay } = require("./hellVisuals.js");
 const { hellEmberDamageMul, consumeHellAbsolution, consumeHellRevenantRequests,
   consumeHellQuellPoints, onRevenantKilled } = require("./hellMechanics.js");
-const { createRevenant, onHellEnemyKilled, spawnSoulfireFor } = require("./hellEnemies.js");
+const { createRevenant, onHellEnemyKilled, spawnSoulfireFor, updateHellBeams } = require("./hellEnemies.js");
 const { chargeWindrunner, consumeWindVolley, drawWindCharge } = require("./windrunner.js");
 const { drawTidecallerShape } = require("./tidecallerVisuals.js");
 const { aggregateBonuses } = require("./talents.js");
@@ -1126,7 +1126,7 @@ function createBattleScene(options) {
       if (m.update) m.update(state, dt, cfg);
     }
     if (state.grasslandCfg) applyGrasslandRewards();
-    if (state.hellCfg) applyHellfireResults(dt);
+    if (state.hellCfg) { applyHellfireResults(dt); applyHellBeamDamage(dt); }
     // 潮汐在 Boss 战继续循环；收益、横流与海克斯在同一帧结算。
     if (!state.tideCfg) return;
     if (tideWasActive && !state.tideActive && state.tideEndHealRatio > 0) {
@@ -1195,6 +1195,38 @@ function createBattleScene(options) {
       state.hellChain = null;
     } else {
       state.hellChainDraw = null;
+    }
+  }
+
+  /**
+   * 业火射线的每帧结算。故意不自己写一套扣血：走与敌弹完全相同的
+   * 无敌 → 「无罪」→ 护盾（双倍承伤 + 残余穿透）→ 生命 路径，
+   * 否则护盾类词条对射线会莫名其妙地失效。
+   */
+  function applyHellBeamDamage(dt) {
+    const raw = updateHellBeams(state, dt);
+    if (raw <= 0) return;
+    if (state.invincibleMs > 0 || state.godMode) return;
+    if (consumeHellAbsolution(state)) return;
+
+    let dmg = Math.max(1, Math.round(raw * 300 * state.curseEnemyDmgMul));
+    if (state.endlessMode) {
+      dmg = Math.max(1, Math.round(dmg * (state.endlessEnemyDmgMulCached || 1)));
+    }
+    if (state.shieldHp > 0) {
+      const shieldMul = Math.max(1, state.shieldDamageMul || 1);
+      const cost = dmg * shieldMul;
+      state.shieldFlashMs = 240;
+      if (state.shieldHp >= cost) { state.shieldHp -= cost; return; }
+      dmg = Math.max(0, dmg - state.shieldHp / shieldMul);
+      state.shieldHp = 0;
+      if (dmg <= 0) return;
+    }
+    state.hp -= dmg;
+    if (state.hp <= 0) {
+      state.hp = 0;
+      state.gameOver = true;
+      finishRun();
     }
   }
 

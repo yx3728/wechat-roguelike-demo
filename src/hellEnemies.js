@@ -1,10 +1,14 @@
 /**
  * hellEnemies.js
  * ----------------------------------------------------------------------------
- * 地狱敌群。两条规矩：
- *   1. 每种敌人开火前都有名为 `warn` 的预警相（hellVisuals 只按这个名字画预警圈），
- *      **预警期间本体不位移、锁定目标不变**——这是草原立下的规矩，这里照办。
- *   2. 每一种都必须跟魂火回路有关系。只会打枪的不要。
+ * 地狱敌群。三条规矩：
+ *   1. 每一种都必须跟魂火回路有关系。只会打枪的不要。
+ *   2. **预警是留给大招的，不是留给每一发子弹的。**
+ *      草原那条"没有预警就不许有子弹"在这里不适用——预警一秒钟只为了吐一颗子弹，
+ *      读起来毫无回报。地狱的做法是：小动作直接打，**带预警的必须是值得读的东西**
+ *      （焦骨的业火射线）。
+ *   3. 有预警的招式，`warn` 相期间**本体不位移、锁定目标不变**——这条反而更要紧了，
+ *      因为射线是一条锁死的直线，玩家全靠预警线读它落在哪。
  *
  * 配色：本体一律焦黑（relL ≤ 0.017，旧敌人从没进过这个亮度区间），
  * 可读性交给 rimColor 轮廓光（对最差底色 10.5–14.7:1）。
@@ -13,6 +17,36 @@
  */
 const { W, H } = require("./config.js");
 const { dropSoulfire, igniteSoulfiresAt, snapAllFuses } = require("./hellMechanics.js");
+
+/**
+ * 业火射线（焦骨的大招）。
+ *   预警 900 ms 画出锁死的瞄准线 → 射线持续 700 ms，宽 16 px，每 220 ms 结算一次。
+ *   单次 tick 伤害 1.6（与敌弹同一套 ×300 缩放 = 480），站满全程约 1920，
+ *   与撞机（2000）同档——**站在激光里的代价应该和撞上去差不多**。
+ * 安全栏：**同时最多 2 道**。焦骨可以刷很多只，没有这条上限时几道射线交叉就成了必吃伤害。
+ */
+const BEAM_WARN_MS = 900;
+const BEAM_MS = 700;
+const BEAM_WIDTH = 16;
+const BEAM_TICK_MS = 220;
+const BEAM_TICK_DMG = 1.6;
+const BEAM_MAX_CONCURRENT = 2;
+
+/**
+ * 场上"占着一个射线名额"的焦骨数——用来卡并发上限。
+ *
+ * 按**相位**数，不按 hellBeam 是否还在：射线到期时 updateHellBeams 会先把 hellBeam 置空，
+ * 而本体要到自己的 hellTimer 走完才退出 beam 相。只看 hellBeam 会在这个缝里漏出一个名额，
+ * 实测能让并发冲到 3（端到端跑出来的，单元测试当时没抓到）。
+ */
+function occupiesBeamSlot(e) {
+  if (!e || e.hp <= 0) return false;
+  if (e.hellBeam) return true;
+  return e.type === "cinderHusk" && (e.hellAttackPhase === "warn" || e.hellAttackPhase === "beam");
+}
+function activeBeamCount(state) {
+  return ((state && state.enemies) || []).filter(occupiesBeamSlot).length;
+}
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 function stepFor(dt) { return Math.min(3, Math.max(0, dt) / 16.667); }
@@ -137,7 +171,7 @@ function approachHold(e, dt) {
   return false;
 }
 
-/** 焦骨：飘到位后瞄准玩家，预警 1200ms 再打一发 */
+/** 焦骨：预警 900ms 锁死一条瞄准线，然后射出 700ms 的业火射线 */
 function updateCinderHusk(e, dt, state) {
   const step = stepFor(dt);
   if (e.hellAttackPhase === "approach") {
@@ -147,23 +181,41 @@ function updateCinderHusk(e, dt, state) {
   if (e.hellAttackPhase === "idle") {
     e.x += Math.sin(e.hellAge * 0.0032) * 0.55 * step;
     e.hellTimer -= dt;
-    if (e.hellTimer <= 0) {
+    // 并发上限没让位就继续等，不硬起手
+    if (e.hellTimer <= 0 && activeBeamCount(state) < BEAM_MAX_CONCURRENT) {
       const p = playerPoint(state), c = center(e);
       e.hellTarget = { x: p.x, y: p.y };
       e.hellAimAngle = Math.atan2(p.y - c.y, p.x - c.x);
-      e.hellAttackPhase = "warn"; e.hellTimer = 1200; e.hellWarnProgress = 0;
+      e.hellAttackPhase = "warn"; e.hellTimer = BEAM_WARN_MS; e.hellWarnProgress = 0;
+    } else if (e.hellTimer <= 0) {
+      e.hellTimer = 260;
     }
     return;
   }
   if (e.hellAttackPhase === "warn") {
-    // 预警期间不动、不改锁定
+    // 预警期间不动、不改锁定——射线是一条锁死的直线，全靠这条线读
     e.hellTimer -= dt;
-    e.hellWarnProgress = clamp(1 - e.hellTimer / 1200, 0, 1);
-    if (e.hellTimer <= 0) { e.hellAttackPhase = "fire"; e.hellShotReady = true; }
+    e.hellWarnProgress = clamp(1 - e.hellTimer / BEAM_WARN_MS, 0, 1);
+    if (e.hellTimer <= 0) {
+      const c = center(e);
+      e.hellAttackPhase = "beam";
+      e.hellTimer = BEAM_MS;
+      e.hellBeam = {
+        x: c.x, y: c.y, angle: e.hellAimAngle,
+        ms: BEAM_MS, maxMs: BEAM_MS, width: BEAM_WIDTH, tickMs: 0,
+      };
+    }
+    return;
+  }
+  if (e.hellAttackPhase === "beam") {
+    e.hellTimer -= dt;
+    // 射线跟着本体走，但角度锁死：本体被推开时线也跟着平移，读到的方向不变
+    if (e.hellBeam) { const c = center(e); e.hellBeam.x = c.x; e.hellBeam.y = c.y; }
+    if (e.hellTimer <= 0) { e.hellBeam = null; e.hellAttackPhase = "idle"; e.hellTimer = 2600; }
     return;
   }
   e.hellAttackPhase = "idle";
-  e.hellTimer = 1500;
+  e.hellTimer = 2600;
 }
 
 /** 拾魂者：径直飞向最近的魂火并吃掉它；吃一个胖一圈 */
@@ -279,13 +331,13 @@ function updateForgeGullet(e, dt, state) {
     if (e.hellTimer <= 0) {
       const p = playerPoint(state), c = center(e);
       e.hellAimAngle = Math.atan2(p.y - c.y, p.x - c.x);
-      e.hellAttackPhase = "warn"; e.hellTimer = 1300; e.hellWarnProgress = 0;
+      e.hellAttackPhase = "warn"; e.hellTimer = 600; e.hellWarnProgress = 0;
     }
     return;
   }
   if (e.hellAttackPhase === "warn") {
     e.hellTimer -= dt;
-    e.hellWarnProgress = clamp(1 - e.hellTimer / 1300, 0, 1);
+    e.hellWarnProgress = clamp(1 - e.hellTimer / 600, 0, 1);
     if (e.hellTimer <= 0) { e.hellAttackPhase = "spit"; e.hellVolleyPending = 3; e.hellTimer = 700; }
     return;
   }
@@ -352,15 +404,6 @@ function updateHellEnemy(e, delta, state) {
 
 function maybeFireHellEnemy(e, delta, state, fireFn) {
   const c = center(e);
-  if (e.hellShotReady) {
-    e.hellShotReady = false;
-    const a = e.hellAimAngle;
-    fireFn({
-      x: c.x - 5, y: c.y + e.h / 2, w: 10, h: 10,
-      vx: Math.cos(a) * 4.6, vy: Math.sin(a) * 4.6,
-      dmg: 1.15, color: "#ff3b30", hellBullet: true,
-    });
-  }
   if (e.hellVolleyPending > 0) {
     e.hellVolleyPending -= 1;
     const a = e.hellAimAngle + (e.hellVolleyPending - 1) * 0.20;
@@ -382,6 +425,42 @@ function maybeFireHellEnemy(e, delta, state, fireFn) {
       });
     }
   }
+}
+
+/** 点到射线（半无限直线）的距离；射线从原点沿 angle 射出，反方向不算命中 */
+function pointBeamDistance(px, py, beam) {
+  const dx = px - beam.x, dy = py - beam.y;
+  const along = dx * Math.cos(beam.angle) + dy * Math.sin(beam.angle);
+  if (along < 0) return Infinity;
+  return Math.abs(-dx * Math.sin(beam.angle) + dy * Math.cos(beam.angle));
+}
+
+/**
+ * 每帧推进全部业火射线，返回**这一帧应该结算给玩家的原始伤害**（未乘 ×300）。
+ * 由 battle.js 走与敌弹相同的护盾 / 「无罪」/ 生命路径，避免出现第二套扣血逻辑。
+ * 射线随本体消失：打死焦骨，它的射线立刻断——这是击杀它的即时回报。
+ */
+function updateHellBeams(state, dt) {
+  const step = Math.max(0, Number(dt) || 0);
+  const p = state && state.player;
+  const px = p ? p.x + p.w / 2 : -1e9;
+  const py = p ? p.y + p.h / 2 : -1e9;
+  const playerR = p ? Math.min(p.w, p.h) / 2 : 0;
+  let damage = 0;
+  ((state && state.enemies) || []).forEach((e) => {
+    if (!e || !e.hellBeam) return;
+    if (e.hp <= 0) { e.hellBeam = null; return; }
+    const beam = e.hellBeam;
+    beam.ms = Math.max(0, beam.ms - step);
+    beam.tickMs -= step;
+    if (beam.ms <= 0) { e.hellBeam = null; return; }
+    if (beam.tickMs > 0) return;
+    if (pointBeamDistance(px, py, beam) <= beam.width / 2 + playerR) {
+      beam.tickMs = BEAM_TICK_MS;
+      damage += BEAM_TICK_DMG;
+    }
+  });
+  return damage;
 }
 
 /** 刑官死亡：全场引信跳到剩余 1.5 秒。由 battle.js 在击杀时调用 */
@@ -406,4 +485,6 @@ module.exports = {
   createCinderHusk, createSoulPicker, createBrandBearer, createChainWarden,
   createForgeGullet, createWarden, createRevenant,
   updateHellEnemy, maybeFireHellEnemy, onHellEnemyKilled, spawnSoulfireFor,
+  updateHellBeams, pointBeamDistance, occupiesBeamSlot,
+  BEAM_WARN_MS, BEAM_MS, BEAM_WIDTH, BEAM_TICK_MS, BEAM_TICK_DMG, BEAM_MAX_CONCURRENT,
 };

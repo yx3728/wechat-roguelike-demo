@@ -181,51 +181,120 @@ test("镇魂加一层业火、回魂加罪值；罪值只走这两个事件", ()
   assert.equal(state.hellSin, sinBefore + h.hell.SIN_ON_RISE, "回魂升罪值");
 });
 
-test("每一发地狱子弹之前都有可见预警，且预警期间不位移、不改锁定", () => {
+test("业火射线：必须有预警，预警期间不位移不改锁定，同时最多两道", () => {
   const h = harness();
-  const roster = ["createCinderHusk", "createSoulPicker", "createBrandBearer",
-    "createChainWarden", "createForgeGullet", "createWarden"];
+  const E = h.hellEnemies;
 
-  let shooters = 0;
-  for (const factory of roster) {
-    const enemy = h.enemies[factory] ? h.enemies[factory](8) : h.hellEnemies[factory](8);
+  // 单只焦骨：预警 → 射线，且预警相里位置和角度都锁死
+  {
+    const husk = E.createCinderHusk(8);
     const state = hellState(h);
-    state.enemies = [enemy];
-
-    let warned = false;
-    let shots = 0;
-    let previousPhase;
-    let anchor = null;
-
-    for (let elapsed = 0; elapsed < 22000; elapsed += 16) {
-      state.elapsed = elapsed;
-      h.hell.updateHellfire(state, 16);
-      h.enemies.updateEnemy(enemy, 16, state);
-      h.enemies.maybeFire(enemy, 16, state, (bullet) => {
-        assert.ok(warned, `${enemy.type} 未经预警就开火`);
-        assert.ok([bullet.x, bullet.y, bullet.vx, bullet.vy].every(Number.isFinite),
-          `${enemy.type} 的子弹坐标必须有限`);
-        shots += 1;
-      });
-      assert.ok([enemy.x, enemy.y, enemy.w, enemy.h].every(Number.isFinite),
-        `${enemy.type} 的位置必须有限`);
-
-      if (enemy.hellAttackPhase === "warn") {
-        warned = true;
-        if (previousPhase !== "warn") {
-          anchor = { x: enemy.x, y: enemy.y, target: JSON.stringify(enemy.hellTarget) };
-        } else {
-          assert.equal(enemy.x, anchor.x, `${enemy.type} 在预警期间移动了`);
-          assert.equal(enemy.y, anchor.y, `${enemy.type} 在预警期间移动了`);
-          assert.equal(JSON.stringify(enemy.hellTarget), anchor.target,
-            `${enemy.type} 在预警期间改了锁定目标`);
+    state.enemies = [husk];
+    let sawWarn = false, sawBeam = false, anchor = null, prev;
+    for (let t = 0; t < 20000; t += 16) {
+      state.elapsed = t;
+      h.enemies.updateEnemy(husk, 16, state);
+      if (husk.hellBeam) {
+        sawBeam = true;
+        assert.ok(sawWarn, "射线出现前必须先有预警");
+        assert.equal(husk.hellBeam.angle, anchor.angle, "射线角度必须就是预警时锁定的那条");
+      }
+      if (husk.hellAttackPhase === "warn") {
+        sawWarn = true;
+        if (prev !== "warn") anchor = { x: husk.x, y: husk.y, angle: husk.hellAimAngle };
+        else {
+          assert.equal(husk.x, anchor.x, "预警期间移动了");
+          assert.equal(husk.y, anchor.y, "预警期间移动了");
+          assert.equal(husk.hellAimAngle, anchor.angle, "预警期间改了瞄准角");
         }
       }
-      previousPhase = enemy.hellAttackPhase;
+      prev = husk.hellAttackPhase;
     }
-    if (shots > 0) shooters += 1;
+    assert.ok(sawWarn && sawBeam, "焦骨要走完预警 → 射线");
   }
-  assert.ok(shooters >= 3, `至少三种地狱敌人会射击（实际 ${shooters}）`);
+
+  // 安全栏：焦骨能刷很多只，但同时最多两道射线（含正在预警的）
+  {
+    const state = hellState(h);
+    state.enemies = [];
+    for (let i = 0; i < 8; i += 1) {
+      const husk = E.createCinderHusk(8);
+      husk.x = 20 + i * 42;
+      husk.y = 120 + (i % 3) * 30;
+      state.enemies.push(husk);
+    }
+    let peak = 0;
+    // 两种推进顺序都试：射线到期与本体退出 beam 相之间有一帧的缝，
+    // 顺序不同会踩到不同的缝（并发冲到 3 就是在这儿漏的）
+    for (const beamsFirst of [false, true]) {
+      for (let t = 0; t < 20000; t += 16) {
+        state.elapsed = t;
+        if (beamsFirst) E.updateHellBeams(state, 16);
+        state.enemies.forEach((e) => h.enemies.updateEnemy(e, 16, state));
+        if (!beamsFirst) E.updateHellBeams(state, 16);
+        const active = state.enemies.filter(E.occupiesBeamSlot).length;
+        peak = Math.max(peak, active);
+        assert.ok(active <= E.BEAM_MAX_CONCURRENT,
+          `同时 ${active} 道射线，超过上限 ${E.BEAM_MAX_CONCURRENT}`);
+      }
+    }
+    assert.equal(peak, E.BEAM_MAX_CONCURRENT, "上限应当真的被顶到，否则这条测试是空跑");
+  }
+
+  // 可解性：预警时长够玩家横向让开射线宽度
+  {
+    const DRAG = 700;                       // 保守拖动速度 px/s
+    const clearance = E.BEAM_WIDTH / 2 + 18;  // 半宽 + 玩家半身
+    const need = (clearance / DRAG) * 1000;
+    assert.ok(need <= E.BEAM_WARN_MS,
+      `让开射线需 ${need.toFixed(0)}ms，预警只有 ${E.BEAM_WARN_MS}ms`);
+  }
+});
+
+test("业火射线只在玩家真的站在线上时结算，且按 tick 不是按帧", () => {
+  const h = harness();
+  const E = h.hellEnemies;
+  const husk = E.createCinderHusk(8);
+  husk.x = 180; husk.y = 100;
+  const state = hellState(h);
+  state.enemies = [husk];
+  // 手动摆一道竖直向下的射线
+  husk.hellBeam = { x: 194, y: 130, angle: Math.PI / 2, ms: 700, maxMs: 700, width: E.BEAM_WIDTH, tickMs: 0 };
+
+  // 玩家在射线正下方 → 挨打，但一次 tick 只结算一次
+  state.player.x = 194 - state.player.w / 2;
+  state.player.y = 600;
+  let total = 0;
+  let ticks = 0;
+  for (let t = 0; t < 700; t += 16) {
+    const d = E.updateHellBeams(state, 16);
+    if (d > 0) { ticks += 1; total += d; }
+    if (!husk.hellBeam) break;
+  }
+  assert.ok(ticks >= 3 && ticks <= 5, `700ms / ${E.BEAM_TICK_MS}ms tick 应结算 3~4 次，实际 ${ticks}`);
+  assert.ok(Math.abs(total - ticks * E.BEAM_TICK_DMG) < 1e-9, "每次 tick 伤害固定");
+
+  // 站开就不挨打
+  const husk2 = E.createCinderHusk(8);
+  const s2 = hellState(h);
+  s2.enemies = [husk2];
+  husk2.hellBeam = { x: 194, y: 130, angle: Math.PI / 2, ms: 700, maxMs: 700, width: E.BEAM_WIDTH, tickMs: 0 };
+  s2.player.x = 194 + E.BEAM_WIDTH / 2 + 40;
+  s2.player.y = 600;
+  let off = 0;
+  for (let t = 0; t < 700; t += 16) off += E.updateHellBeams(s2, 16);
+  assert.equal(off, 0, "让开射线宽度之后不该再结算伤害");
+
+  // 打死焦骨，射线立刻断——这是击杀它的即时回报
+  const husk3 = E.createCinderHusk(8);
+  const s3 = hellState(h);
+  s3.enemies = [husk3];
+  husk3.hellBeam = { x: 194, y: 130, angle: Math.PI / 2, ms: 700, maxMs: 700, width: E.BEAM_WIDTH, tickMs: 0 };
+  s3.player.x = 194 - s3.player.w / 2;
+  s3.player.y = 600;
+  husk3.hp = 0;
+  assert.equal(E.updateHellBeams(s3, 16), 0, "本体死亡后射线不该继续结算");
+  assert.equal(husk3.hellBeam, null, "本体死亡后射线应当断掉");
 });
 
 test("拾魂者跟玩家抢魂火，刑官死亡把全场引信压到 1.5 秒", () => {

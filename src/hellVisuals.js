@@ -106,6 +106,34 @@ function warnRing(ctx, e) {
   ctx.restore();
 }
 
+/** 业火射线：白热的芯 + 危险色的外缘；收尾时整体变细，读得出"要停了" */
+function drawHellBeam(ctx, beam) {
+  const life = clamp(beam.ms / Math.max(1, beam.maxMs), 0, 1);
+  const taper = life > 0.25 ? 1 : life / 0.25;
+  const len = 1400;
+  const ex = beam.x + Math.cos(beam.angle) * len;
+  const ey = beam.y + Math.sin(beam.angle) * len;
+  ctx.save();
+  ctx.lineCap = "round";
+  // 外缘：判定宽度就是这一层
+  ctx.strokeStyle = DANGER;
+  ctx.globalAlpha = 0.55 * taper;
+  ctx.lineWidth = beam.width * taper;
+  ctx.beginPath();
+  ctx.moveTo(beam.x, beam.y);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  // 芯：白热，比判定窄——不会让玩家以为判定比实际细
+  ctx.strokeStyle = "#ffffff";
+  ctx.globalAlpha = 0.85 * taper;
+  ctx.lineWidth = Math.max(1, beam.width * 0.32 * taper);
+  ctx.beginPath();
+  ctx.moveTo(beam.x, beam.y);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawHellEnemy(ctx, e, state) {
   if (!e || !e.isHell) return false;
   const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
@@ -129,13 +157,38 @@ function drawHellEnemy(ctx, e, state) {
   }
 
   if (e.type === "cinderHusk") {
+    // 预警：锁死的瞄准线。射线是一条直线，玩家全靠这条线读它落在哪，
+    // 所以这里画的是**线**不是圈——圈只说"有事要发生"，线说"事发生在这儿"。
+    if (e.hellAttackPhase === "warn" && Number.isFinite(e.hellAimAngle)) {
+      const p = clamp(e.hellWarnProgress || 0, 0, 1);
+      ctx.save();
+      ctx.strokeStyle = DANGER;
+      ctx.globalAlpha = 0.25 + 0.45 * p;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([9, 7]);
+      ctx.lineDashOffset = -(e.hellAge || 0) * 0.05;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(e.hellAimAngle) * 1400, cy + Math.sin(e.hellAimAngle) * 1400);
+      ctx.stroke();
+      ctx.restore();
+      // 收束的准星：进度条也是倒计时
+      ctx.save();
+      ctx.strokeStyle = DANGER;
+      ctx.globalAlpha = 0.35 + 0.5 * p;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, e.w * 0.55 + (1 - p) * 22, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
     silhouette(ctx, e, () => {
       ctx.moveTo(cx, e.y);
       ctx.lineTo(e.x + e.w, e.y + e.h * 0.62);
       ctx.lineTo(cx, e.y + e.h);
       ctx.lineTo(e.x, e.y + e.h * 0.62);
     });
-    warnRing(ctx, e);
+    if (e.hellBeam) drawHellBeam(ctx, e.hellBeam);
     return true;
   }
 
