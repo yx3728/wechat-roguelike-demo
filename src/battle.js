@@ -77,6 +77,10 @@ const { drawGrasslandBackground, drawGrasslandEnemy, drawGrasslandOverlay, drawW
 const { drawGrasslandTexture } = require("./grasslandTextures.js");
 const { interceptGrassBullet, grassPlayerMoveMul, consumeGrassAmbush, consumeGrasslandRewards } = require("./grasslandMechanics.js");
 const { grassDamageTakenMul } = require("./grasslandEnemies.js");
+const { drawHellBackground, drawHellEnemy, drawHellBoss, drawHellOverlay } = require("./hellVisuals.js");
+const { hellEmberDamageMul, consumeHellAbsolution, consumeHellRevenantRequests,
+  consumeHellQuellPoints, onRevenantKilled } = require("./hellMechanics.js");
+const { createRevenant, onHellEnemyKilled, spawnSoulfireFor } = require("./hellEnemies.js");
 const { chargeWindrunner, consumeWindVolley, drawWindCharge } = require("./windrunner.js");
 const { drawTidecallerShape } = require("./tidecallerVisuals.js");
 const { aggregateBonuses } = require("./talents.js");
@@ -509,6 +513,7 @@ function createBattleScene(options) {
     sandstormCfg: (battleMap && battleMap.mechanics && battleMap.mechanics.sandstorm) || null,
     tideCfg: (battleMap && battleMap.mechanics && battleMap.mechanics.tide) || null,
     grasslandCfg: (battleMap && battleMap.mechanics && battleMap.mechanics.grasslandHabitat) || null,
+    hellCfg: (battleMap && battleMap.mechanics && battleMap.mechanics.hellfireRevenant) || null,
 
     /** Boss 出招期间为 true：同屏杂兵/精英停火，避免两层弹幕叠死安全走廊 */
     addFireSuppressed: false,
@@ -570,7 +575,8 @@ function createBattleScene(options) {
     const sz = state.bulletSizeMul;
     const sp = state.bulletSpeedMul;
     const windVolley = consumeWindVolley(state);
-    const volleyDamage = state.bulletDamage * (windVolley ? 1.8 : 1) * consumeGrassAmbush(state);
+    const volleyDamage = state.bulletDamage * (windVolley ? 1.8 : 1) * consumeGrassAmbush(state)
+      * hellEmberDamageMul(state);
     const volleyPierce = state.bulletPierceEnemies || windVolley;
 
     // 主弹
@@ -1120,6 +1126,7 @@ function createBattleScene(options) {
       if (m.update) m.update(state, dt, cfg);
     }
     if (state.grasslandCfg) applyGrasslandRewards();
+    if (state.hellCfg) applyHellfireResults(dt);
     // 潮汐在 Boss 战继续循环；收益、横流与海克斯在同一帧结算。
     if (!state.tideCfg) return;
     if (tideWasActive && !state.tideActive && state.tideEndHealRatio > 0) {
@@ -1140,6 +1147,54 @@ function createBattleScene(options) {
       // 维持拖拽锚点，避免下一次触摸移动将洋流位移突然复位。
       if (state.touchActive) state.touchOffsetX -= p.x - prevX;
       chargeWindrunner(state, prevX, p.y);
+    }
+  }
+
+  /**
+   * 业火回魂的每帧结算：把机制排出来的请求兑现成战场上的东西。
+   * 机制模块不认识敌人类型也不碰玩家坐标，那些都在这里做。
+   */
+  function applyHellfireResults(dt) {
+    // 回魂：机制只排请求，这里才真的造出亡魂
+    consumeHellRevenantRequests(state).forEach((req) => {
+      state.enemies.push(createRevenant(req));
+    });
+
+    // 「镇魂爆」：每次镇魂在原地炸开
+    const radius = state.hellQuellRadius || 0;
+    if (radius > 0) {
+      consumeHellQuellPoints(state).forEach((pt) => {
+        const dmg = state.bulletDamage * (state.hellQuellDamageMul || 0);
+        if (dmg <= 0) return;
+        state.enemies.forEach((enemy) => {
+          if (!enemy || enemy.hp <= 0) return;
+          const ex = enemy.x + enemy.w / 2, ey = enemy.y + enemy.h / 2;
+          if (Math.hypot(ex - pt.x, ey - pt.y) <= radius) enemy.hp -= dmg;
+        });
+      });
+    }
+
+    // 锁魂的链子：把玩家朝最近的魂火拖。与潮汐横流一样要维持拖拽锚点
+    if (state.hellChain) {
+      const p = state.player;
+      const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+      const dx = state.hellChain.x - cx, dy = state.hellChain.y - cy;
+      const d = Math.hypot(dx, dy);
+      if (d > 6) {
+        const move = Math.min(d, (state.hellChain.strength * dt) / 1000);
+        const prevX = p.x, prevY = p.y;
+        p.x = Math.max(0, Math.min(W - p.w, p.x + (dx / d) * move));
+        p.y = Math.max(0, Math.min(H - p.h, p.y + (dy / d) * move));
+        if (state.touchActive) {
+          state.touchOffsetX -= p.x - prevX;
+          state.touchOffsetY -= p.y - prevY;
+        }
+        chargeWindrunner(state, prevX, prevY);
+      }
+      state.hellChainDraw = { fromX: state.hellChain.from.x, fromY: state.hellChain.from.y, toX: cx, toY: cy };
+      state.hellChain = null;
+    } else {
+      state.hellChainDraw = null;
     }
   }
 
@@ -1822,6 +1877,13 @@ function createBattleScene(options) {
   function dropLootFromEnemy(enemy) {
     const cx = enemy.x + enemy.w / 2;
     const cy = enemy.y + enemy.h / 2;
+
+    // 地狱：普通敌人原地留下魂火；亡魂被 spawnSoulfireFor 内部挡掉（回路不递归）
+    if (state.hellCfg) {
+      if (enemy.isHellRevenant) onRevenantKilled(state);
+      else spawnSoulfireFor(enemy, state, state.level);
+      onHellEnemyKilled(enemy, state);
+    }
 
     // 沙漠：普通敌人不再每只必掉经验球（精英/Boss 不受限）
     const lootCfg = state.mapLoot;
@@ -2720,6 +2782,16 @@ function createBattleScene(options) {
           } else b.grassConsumed = true;
         }
       }
+      if (b.hellLinger) {
+        // 炉火飞一段后停在原地烧；无间的判决格直接从"烧"这一相开始
+        if (b.hellLingerMs > 0) {
+          b.hellLingerMs -= dt;
+          if (b.hellLingerMs <= 0) { b.vx = 0; b.vy = 0; }
+        } else {
+          b.hellBurnMs -= dt;
+          if (b.hellBurnMs <= 0) b.grassConsumed = true;
+        }
+      }
       if (state.grasslandCfg && !b.grassConsumed && interceptGrassBullet(state, b, false, terrainPrevX, terrainPrevY)) b.grassConsumed = true;
     });
     if (state.grasslandCfg) applyGrasslandRewards();
@@ -3055,6 +3127,8 @@ function createBattleScene(options) {
 
       // 暂时无敌：直接消弹不扣血；DEV 无敌同理
       if (state.invincibleMs > 0 || state.godMode) continue;
+      // 「无罪」：业火满层时吃掉一次伤害并清空全部层数
+      if (state.hellCfg && (b.dmg || 0) > 0 && consumeHellAbsolution(state)) continue;
 
       const rawBdmg = b.dmg || 0;
       let incomingBulletDmg =
@@ -3249,6 +3323,7 @@ function createBattleScene(options) {
 
   function drawBackground(ctx) {
     if (state.mapParticle === "grassland") { drawGrasslandBackground(ctx, state, W, H); return; }
+    if (state.mapParticle === "hell") { drawHellBackground(ctx, state, W, H); return; }
     if (state.mapParticle === "ocean") {
       drawOceanBackground(ctx, state, W, H);
       return;
@@ -3640,7 +3715,9 @@ function createBattleScene(options) {
       const cx = enemy.x + enemy.w / 2;
       const cy = enemy.y + enemy.h / 2;
 
-      const grassDrawn = drawGrasslandTexture(ctx, enemy, state, battleTexturesEnabled()) || drawGrasslandEnemy(ctx, enemy, state);
+      const hellDrawn = drawHellBoss(ctx, enemy, state) || drawHellEnemy(ctx, enemy, state);
+      const grassDrawn = hellDrawn
+        || drawGrasslandTexture(ctx, enemy, state, battleTexturesEnabled()) || drawGrasslandEnemy(ctx, enemy, state);
       const desertDrawn = !grassDrawn && drawDesertEnemyVisual(ctx, enemy, state, battleTexturesEnabled());
       const textureDrawn = !grassDrawn && !desertDrawn && drawEnemyTexture(ctx, enemy, state, battleTexturesEnabled());
       const oceanDrawn = !grassDrawn && !desertDrawn && !textureDrawn && drawOceanEnemy(ctx, enemy, state);
@@ -4396,6 +4473,7 @@ function createBattleScene(options) {
     drawBackground(ctx);
     if (state.mapParticle === "ocean") drawOceanOverlay(ctx, state, W, H);
     if (state.mapParticle === "grassland") drawGrasslandOverlay(ctx, state, W, H);
+    if (state.mapParticle === "hell") drawHellOverlay(ctx, state, W, H);
     drawHanbaTelegraphs(ctx);
     drawItems(ctx);
     drawBullets(ctx);

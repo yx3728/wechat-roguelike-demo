@@ -154,6 +154,40 @@ const MAPS = [
       { bg: "#172f2b", star: "#a8dbb0", ripple: "#365c45" },
     ],
   },
+  {
+    id: "hell",
+    name: "地狱",
+    desc: "杀死的每一个敌人都会站起来。收走魂火，或者面对它。",
+    accent: "#ff6b3d",
+    unlockBy: "mapClear",
+    unlockMapId: "grassland",
+    unlockHint: "通关草原后解锁",
+    showLocked: true,
+    enemyPool: "hell",
+    eliteType: "warden",
+    bossVariant: "yama",
+    /**
+     * 业火回魂：本作唯一由**玩家自己的击杀速率**驱动的压力轴。
+     * Boss 战期间**不挂起**（沙暴是挂起的）——这不是天气，是玩家自己的经济，
+     * 而且阎罗的「业火判决」直接拿它做文章。
+     */
+    mechanics: {
+      hellfireRevenant: {},
+    },
+    particle: "hell",
+    /** 地狱资源最紧：经验球一半概率，道具率砍到四分之一 */
+    loot: {
+      expOrbChance: 0.5,
+      dropMul: 0.25,
+    },
+    /** 四条底色都是低彩度暗色，把全部饱和度让给危险色（见 docs/hell-map.md 第三节） */
+    themes: [
+      { bg: "#241f2b", ripple: "#2e2736", star: "#c9b8d6" }, // 熄炉
+      { bg: "#2c2622", ripple: "#382f29", star: "#d8c6ae" }, // 焦土
+      { bg: "#1d2620", ripple: "#26332c", star: "#b3c9bb" }, // 硫沼
+      { bg: "#332330", ripple: "#402c3c", star: "#dcbcd2" }, // 裂隙
+    ],
+  },
 ];
 
 function getMapById(id) {

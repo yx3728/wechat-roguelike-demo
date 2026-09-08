@@ -30,6 +30,7 @@
 const { W, H } = require("./config.js");
 const oceanEnemies = require("./oceanEnemies.js");
 const grasslandEnemies = require("./grasslandEnemies.js");
+const hellEnemies = require("./hellEnemies.js");
 
 // ============================================================================
 // 各种敌机的工厂函数。level 是玩家当前等级，用来微调难度成长。
@@ -430,6 +431,7 @@ const BOSS_VARIANTS = [
   { id: "hanba", name: "旱魃", color: "#94a3b8", forceable: true },
   { id: "leviathan", name: "归墟·利维坦", color: "#5eead4", forceable: true, coin: 1000 },
   { id: "antlerKing", name: "苍岚鹿王", color: "#bbd784", forceable: true, coin: 1200 },
+  { id: "yama", name: "阎罗", color: "#171418", forceable: true, coin: 1400 },
   { id: "void", name: "虚空", color: "#7c3aed", forceable: true, continuous: true },
   { id: "voidCore", name: "虚空二阶段", color: "#a855f7", forceable: true, continuous: true },
 ];
@@ -495,7 +497,7 @@ function createBoss(variant, level) {
     vx: 0,
     movePhase: 0,
     exp: 0,
-    coin: bossVariant === "antlerKing" ? 1200 : 800,
+    coin: bossVariant === "antlerKing" ? 1200 : bossVariant === "yama" ? 1400 : 800,
 
     // bossAi 字段
     entered: false,
@@ -604,6 +606,13 @@ const ENEMY_POOLS = {
     { type: "armoredCrab", weight: 1, minWave: 2 },
     { type: "inkCuttlefish", weight: 2, minWave: 3 },
   ],
+  hell: [
+    { type: "cinderHusk", weight: 5, minWave: 1 },
+    { type: "soulPicker", weight: 3, minWave: 1 },
+    { type: "brandBearer", weight: 2, minWave: 2 },
+    { type: "chainWarden", weight: 2, minWave: 2 },
+    { type: "forgeGullet", weight: 2, minWave: 3 },
+  ],
   grassland: [
     { type: "meadowHare", weight: 5, minWave: 1 },
     { type: "bladeMantis", weight: 2, minWave: 1 },
@@ -635,6 +644,11 @@ const ENEMY_FACTORIES = {
   lanternBeetle: grasslandEnemies.createLanternBeetle,
   thornBloom: grasslandEnemies.createThornBloom,
   galeFalcon: grasslandEnemies.createGaleFalcon,
+  cinderHusk: hellEnemies.createCinderHusk,
+  soulPicker: hellEnemies.createSoulPicker,
+  brandBearer: hellEnemies.createBrandBearer,
+  chainWarden: hellEnemies.createChainWarden,
+  forgeGullet: hellEnemies.createForgeGullet,
 };
 
 function resolvePool(poolName) {
@@ -708,6 +722,10 @@ function updateEnemy(enemy, delta, state) {
   }
   if (enemy.isGrassland) {
     grasslandEnemies.updateGrasslandEnemy(enemy, delta, state);
+    return;
+  }
+  if (enemy.isHell) {
+    hellEnemies.updateHellEnemy(enemy, delta, state);
     return;
   }
 
@@ -830,6 +848,10 @@ function maybeFire(enemy, delta, state, fireFn) {
     grasslandEnemies.maybeFireGrasslandEnemy(enemy, delta, state, fireFn);
     return;
   }
+  if (enemy.isHell) {
+    hellEnemies.maybeFireHellEnemy(enemy, delta, state, fireFn);
+    return;
+  }
 
   // ---------- 沙蠕：只在露出期吐 5 路扇形沙弹 ----------
   if (enemy.isSandworm) {
@@ -930,6 +952,7 @@ const ELITE_FACTORIES = {
   sandworm: createSandworm,
   abyssalAngler: oceanEnemies.createAbyssalAngler,
   thunderBison: grasslandEnemies.createThunderBison,
+  warden: hellEnemies.createWarden,
 };
 
 function createEliteFor(eliteType, level) {
@@ -945,8 +968,12 @@ module.exports = {
   bossIsContinuous,
   bossCoin,
   ENEMY_POOLS,
+  ENEMY_FACTORIES,
   ELITE_FACTORIES,
   createEliteFor,
+  createRevenant: hellEnemies.createRevenant,
+  onHellEnemyKilled: hellEnemies.onHellEnemyKilled,
+  spawnSoulfireFor: hellEnemies.spawnSoulfireFor,
   spawnEnemyForWave,
   createGrunt,
   createSwift,
@@ -978,4 +1005,10 @@ module.exports = {
   createThornBloom: grasslandEnemies.createThornBloom,
   createGaleFalcon: grasslandEnemies.createGaleFalcon,
   createThunderBison: grasslandEnemies.createThunderBison,
+  createCinderHusk: hellEnemies.createCinderHusk,
+  createSoulPicker: hellEnemies.createSoulPicker,
+  createBrandBearer: hellEnemies.createBrandBearer,
+  createChainWarden: hellEnemies.createChainWarden,
+  createForgeGullet: hellEnemies.createForgeGullet,
+  createWarden: hellEnemies.createWarden,
 };

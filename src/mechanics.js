@@ -171,8 +171,9 @@ const tide = {
 };
 
 const { grasslandHabitat } = require("./grasslandMechanics.js");
+const { hellfireRevenant } = require("./hellMechanics.js");
 
-const MECHANICS = [sandstorm, tide, grasslandHabitat];
+const MECHANICS = [sandstorm, tide, grasslandHabitat, hellfireRevenant];
 
 function getMechanic(id) {
   for (let i = 0; i < MECHANICS.length; i += 1) {

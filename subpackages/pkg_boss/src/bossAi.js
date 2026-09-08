@@ -24,6 +24,7 @@
 
 const { W, H } = require("../../../src/config.js");
 const { updateGrasslandBoss, GRASS_BOSS_SEQUENCES } = require("./grasslandBoss.js");
+const { updateHellBoss, HELL_BOSS_SEQUENCES } = require("./hellBoss.js");
 
 // Boss 全屏活动范围（留 60px 给上方 HUD，底部留 180px 给玩家飞行）
 const ROAM_TOP = 60;
@@ -2851,6 +2852,10 @@ function updateBoss(boss, delta, state, fireFn, spawnFn) {
     updateGrasslandBoss(boss, delta, state, fireFn, spawnFn);
     return;
   }
+  if (boss.bossVariant === "yama") {
+    updateHellBoss(boss, delta, state, fireFn, spawnFn);
+    return;
+  }
   if (boss.bossVariant === "hanba") {
     updateBossHanba(boss, delta, state, fireFn, spawnFn);
     return;
@@ -2887,4 +2892,5 @@ module.exports = {
   HANBA_COMBOS,
   LEVIATHAN_SEQUENCES,
   GRASS_BOSS_SEQUENCES,
+  HELL_BOSS_SEQUENCES,
 };

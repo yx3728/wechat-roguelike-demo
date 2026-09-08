@@ -110,7 +110,7 @@ function enemyInventory(env) {
   enemies.BOSS_VARIANTS.forEach(({ id }) => all.push(id === "voidCore"
     ? enemies.createVoidCoreBoss(100, 120, 10) : enemies.createBoss(id, 10)));
   all.forEach((enemy) => { enemy.x = 100; enemy.y = 120; });
-  assert.equal(all.length, 31);
+  assert.equal(all.length, 38);
   const owner = enemies.createBoss("void", 10);
   all.push({ type: "mirror", isMirror: true, ownerBossRef: owner,
     x: 70, y: 90, w: 80, h: 80, hp: 1000, maxHp: 1000,
@@ -118,8 +118,25 @@ function enemyInventory(env) {
   return all;
 }
 
+/**
+ * 地狱是**故意**没有图集的：这张图的敌人造型就是"焦黑本体 + 白热轮廓"，
+ * 由 hellVisuals 直接画出来，不是贴图换皮（见 docs/hell-map.md 第三节）。
+ * 所以它们走下面的 procedural 分支：必须被自己的绘制模块认领，且一张图片都不加载——
+ * 贴图开关对它们天然成立。
+ */
+const PROCEDURAL_TYPES = new Set([
+  "cinderHusk", "soulPicker", "brandBearer", "chainWarden", "forgeGullet", "warden", "revenant",
+]);
+function isProcedural(enemy) {
+  return PROCEDURAL_TYPES.has(enemy.type) || enemy.bossVariant === "yama";
+}
+
 function drawEnemy(env, ctx, enemy, enabled) {
   const state = { elapsed: 4200, flashEffectsOn: false };
+  if (isProcedural(enemy)) {
+    const hell = env.load("src/hellVisuals.js");
+    return hell.drawHellBoss(ctx, enemy, state) || hell.drawHellEnemy(ctx, enemy, state);
+  }
   if (env.load("src/grasslandTextures.js").drawGrasslandTexture(ctx, enemy, state, enabled)) return true;
   if (env.load("src/enemyTextures.js").drawEnemyTexture(ctx, enemy, state, enabled)) return true;
   if (env.load("src/grasslandVisuals.js").drawGrasslandEnemy(ctx, enemy, state)) return true;
@@ -145,14 +162,17 @@ test("all ten registered characters have menu and battle textures using valid PN
   assert.deepEqual(recorder.errors, []);
 });
 
-test("all 31 registered enemies and the Void mirror draw actual textures without changing combat fields", () => {
+test("all 38 registered enemies and the Void mirror are claimed by a renderer without changing combat fields", () => {
   const env = runtime();
   const recorder = canvasRecorder();
   for (const enemy of enemyInventory(env)) {
     const before = JSON.stringify(enemy);
     const drawCount = recorder.draws.length;
     assert.equal(drawEnemy(env, recorder.ctx, enemy, true), true, enemy.bossVariant || enemy.type);
-    assert.equal(recorder.draws.length, drawCount + 1, `missing texture: ${enemy.bossVariant || enemy.type}`);
+    // 有图集的必须真的贴一张图；地狱是画出来的，一张都不许加载
+    const expected = isProcedural(enemy) ? drawCount : drawCount + 1;
+    assert.equal(recorder.draws.length, expected,
+      `${isProcedural(enemy) ? "procedural enemy must not load images" : "missing texture"}: ${enemy.bossVariant || enemy.type}`);
     assert.equal(JSON.stringify(enemy), before, "renderer must not modify enemy gameplay fields");
   }
   assert.equal(new Set(env.requests).size, 6, "two existing images plus four map atlases");

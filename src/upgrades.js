@@ -453,6 +453,32 @@ const UPGRADE_POOL = [
   entry("blue", "grass_freestep", "断藤步", "免疫藤蔓缠绕与拖拽减速",
     (s) => { s.grassSnareImmune = true; s.grassSnaredMs = 0; }, null, { maps: ["grassland"] }),
 
+  // ---------- 地狱专属：全部围绕魂火回路（收得更容易 / 烧得更慢 / 把镇魂换成别的东西）----------
+  entry("blue", "hell_draw", "引魂", "镇魂判定半径 28 → 98 像素\n走近即收，不必精确压上",
+    (s) => { s.hellBankRadius = Math.max(s.hellBankRadius || 28, 98); },
+    null, { maps: ["hell"] }),
+
+  entry("blue", "hell_reprieve", "缓刑", "所有魂火引信 +2.0 秒\n现存与新掉落的都生效",
+    (s) => {
+      s.hellFuseBonusMs = (s.hellFuseBonusMs || 0) + 2000;
+      (s.hellSoulfires || []).forEach((f) => { f.fuseMs += 2000; f.fuseMaxMs += 2000; });
+    }, null, { maps: ["hell"] }),
+
+  entry("green", "hell_emberhold", "余烬不熄", "业火层上限 6 → 9\n每层计时 4.0 → 5.5 秒",
+    (s) => { s.hellEmberMax = 9; s.hellEmberLifeMs = 5500; },
+    null, { maps: ["hell"] }),
+
+  entry("purple", "hell_quell", "镇魂爆", "每次镇魂在原地炸开\n对 90 像素内敌人造成主炮伤害 ×2.5",
+    (s) => { s.hellQuellRadius = 90; s.hellQuellDamageMul = 2.5; },
+    null, { maps: ["hell"] }),
+
+  entry("orange", "hell_absolution", "无罪", "业火满层时免疫一次伤害\n触发后清空全部业火层，冷却 12 秒",
+    (s) => { s.hellAbsolution = true; s.hellAbsolutionCdMs = 0; },
+    null, { maps: ["hell"] }),
+
+  entry("blue", "hell_pardon", "赦令", "击杀亡魂返还 1 层业火\n打扫失败也有回收路径",
+    (s) => { s.hellPardon = true; }, null, { maps: ["hell"] }),
+
   // ---------- 海洋专属：利用涨潮爆发，或将涨退潮转化为生存资源 ----------
   entry("green", "ocean_rapid", "涨潮快射", "涨潮期间射速 +30%",
     (s) => { s.tideFireRateMul = Math.max(s.tideFireRateMul || 1, 1.3); },

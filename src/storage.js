@@ -54,6 +54,7 @@ const DEFAULT_SAVE = {
     desert: false,
     ocean: true,
     grassland: false,
+    hell: false,
   },
   completedMaps: {},
   bestKills: 0,
