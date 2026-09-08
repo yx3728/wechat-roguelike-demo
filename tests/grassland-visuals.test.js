@@ -77,31 +77,42 @@ test("king pose animates in both phases, honors reduced effects and never mutate
   }
 });
 
-test("grass backgrounds and actual locked attack warnings remain finite across phone and wide sizes", () => {
+// 旧版本这里断言的是侧风 HUD（"横风将至"）与 antlerFan / hoofStamp / galeCorridor
+// 三个 Boss 招式——那是被放弃的设计，grasslandVisuals 从未实现过它们。
+// 现行 overlay 只画三种预警：犁地路线、护群连线、螳螂落点。
+test("grass backgrounds and shipped telegraphs stay finite and label-free across sizes", () => {
   for (const width of [320, 390, 768]) {
-    for (const phase of ["warn", "active"]) {
-      const entries = [
-        king(1, { grassState: "warn", grassAttack: "antlerFan", grassWarnProgress: 0.8,
-          grassFanOrigins: [{ x: width / 2 - 35, y: 252, angles: [1.2, 1.57, 1.9] }, { x: width / 2 + 35, y: 252, angles: [1.2, 1.57, 1.9] }] }),
-        king(2, { grassState: "warn", grassAttack: "hoofStamp", grassWarnProgress: 0.8, grassStampZones: [{ x: width / 2, y: 620, r: 92 }] }),
-        king(2, { grassState: "warn", grassAttack: "galeCorridor", grassWarnProgress: 0.8, grassGapCenter: width / 2, grassGapWidth: 108, grassWallY: 354 }),
-        ...["bladeMantis", "thunderBison", "thornBloom", "lanternBeetle"].map((type) => enemy(type, { grassAttackPhase: "warn", grassWarnProgress: 0.6, grassAimAngle: 1.5, grassTarget: { x: width / 2, y: 580 } })),
-      ];
-      const state = frozen({ elapsed: 1400, enemies: entries, grassWindPhase: phase, grassWindPhaseMs: 1400, grassWindDirection: -1, crosswindCfg: { warnMs: 2000, activeMs: 7000 } });
-      const c = canvas(); visuals.drawGrasslandBackground(c.ctx, state, width, 844); visuals.drawGrasslandOverlay(c.ctx, state, width, 844); c.restored();
-      const labels = c.calls.filter((call) => call.name === "fillText").map((call) => call.args[0]);
-      assert.deepEqual(labels, [phase === "warn" ? "横风将至 ←  1s" : "横风 ←  6s"], "only the brief wind-cycle HUD remains textual");
-      const ringOnly = canvas(); visuals.drawGrasslandOverlay(ringOnly.ctx, { enemies: [entries[1]] }, width, 844);
-      assert.ok(ringOnly.calls.some((call) => call.name === "arc" && call.args[2] === 92));
-      assert.ok(!ringOnly.calls.some((call) => call.name === "fill" || call.name === "fillRect"), "outward ring must never imply a filled damaging center");
-      ringOnly.restored();
-      for (const entry of entries) {
-        const graphic = canvas(); visuals.drawGrasslandOverlay(graphic.ctx, { enemies: [entry] }, width, 844);
-        assert.ok(!graphic.calls.some((call) => call.name === "fillText"), "combat telegraphs must use visual guides without labels");
-        graphic.restored();
-      }
+    const entries = [
+      king(1, { grassState: "warn", grassAttack: "antlerPlow", grassWarnProgress: 0.8,
+        grassPlowFrom: { x: width / 2, y: 200 }, grassPlowTo: { x: width / 2, y: 640 } }),
+      king(2, { grassState: "guard", grassAttack: "herdGuard", grassHerdRefs: [] }),
+      ...["bladeMantis", "thunderBison", "thornBloom", "lanternBeetle"].map((type) =>
+        enemy(type, { grassAttackPhase: "warn", grassWarnProgress: 0.6, grassAimAngle: 1.5,
+          grassLanding: { x: width / 2, y: 580 }, grassTarget: { x: width / 2, y: 580 } })),
+    ];
+    const state = frozen({ elapsed: 1400, enemies: entries });
+
+    const c = canvas();
+    visuals.drawGrasslandBackground(c.ctx, state, width, 844);
+    visuals.drawGrasslandOverlay(c.ctx, state, width, 844);
+    c.restored();
+    // 战斗预警一律用图形表达，不允许出现文字标签
+    assert.deepEqual(c.calls.filter((call) => call.name === "fillText").map((call) => call.args[0]), [],
+      "combat telegraphs must use visual guides without labels");
+    assert.ok(c.calls.every((call) => (call.args || []).every(
+      (a) => typeof a !== "number" || Number.isFinite(a))), "no NaN reaches the canvas");
+
+    for (const entry of entries) {
+      const graphic = canvas();
+      visuals.drawGrasslandOverlay(graphic.ctx, { enemies: [entry] }, width, 844);
+      assert.ok(!graphic.calls.some((call) => call.name === "fillText"),
+        "combat telegraphs must use visual guides without labels");
+      graphic.restored();
     }
-    const swatch = canvas(); visuals.drawGrasslandSwatch(swatch.ctx, 0, 0, width, 70, {}); swatch.restored();
+
+    const swatch = canvas();
+    visuals.drawGrasslandSwatch(swatch.ctx, 0, 0, width, 70, {});
+    swatch.restored();
   }
 });
 
