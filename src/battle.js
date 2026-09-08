@@ -39,10 +39,18 @@ const {
 const {
   spawnEnemyForWave,
   createElite,
+  createSandworm,
+  createEliteFor,
+  forceableBossIds,
+  bossLeadsToHidden,
+  bossIsContinuous,
+  bossCoin,
   createBoss,
   createVoidCoreBoss,
   createSwift,
   createGrunt,
+  createGaleFalcon,
+  createThornBloom,
   updateEnemy,
   maybeFire,
 } = require("./enemies.js");
@@ -52,8 +60,25 @@ const {
   UPGRADE_POOL,
   hasAnyUpgradeAvailable,
   grantRunCoins,
+  effectiveCritMult,
 } = require("./upgrades.js");
 const { createItem } = require("./items.js");
+const {
+  resolveSelectedMap,
+  pickMapBossVariant,
+  mapsUnlockedByHiddenBoss,
+} = require("./maps.js");
+const { getMechanic, mechanicDefaults } = require("./mechanics.js");
+const { drawOceanBackground, drawOceanEnemy, drawOceanOverlay } = require("./oceanVisuals.js");
+const { drawDesertEnemyVisual } = require("./desertVisuals.js");
+const { drawEnemyTexture } = require("./enemyTextures.js");
+const { drawCharacterTexture } = require("./characterVisuals.js");
+const { drawGrasslandBackground, drawGrasslandEnemy, drawGrasslandOverlay, drawWindrunnerShape } = require("./grasslandVisuals.js");
+const { drawGrasslandTexture } = require("./grasslandTextures.js");
+const { interceptGrassBullet, grassPlayerMoveMul, consumeGrassAmbush, consumeGrasslandRewards } = require("./grasslandMechanics.js");
+const { grassDamageTakenMul } = require("./grasslandEnemies.js");
+const { chargeWindrunner, consumeWindVolley, drawWindCharge } = require("./windrunner.js");
+const { drawTidecallerShape } = require("./tidecallerVisuals.js");
 const { aggregateBonuses } = require("./talents.js");
 const storage = require("./storage.js");
 const audio = require("./audio.js");
@@ -155,6 +180,9 @@ function pickupRadiusPx(state) {
 /** 「时间流护盾」：区域内敌机本体位移降为 50%（每帧对已集成位移缩放，等价于速度与轨迹减半） */
 const TIMEFLOW_SHIELD_MOVE_MUL = 0.5;
 
+/** 沙暴期远处敌人的最低透明度（越小越看不清） */
+const SANDSTORM_MIN_ENEMY_ALPHA = 0.14;
+
 /** 「反间护盾」：转化敌弹的周期间隔（毫秒） */
 const TURNCOAT_SHIELD_INTERVAL_MS = 15000;
 
@@ -229,88 +257,42 @@ function createBattleScene(options) {
   let forcedUpgradeIds = [];    // 本局必出升级 id 列表（每条保证至少出现一次）
   let vampireSatelliteImg = null;
   let vampireSatelliteImgReady = false;
-  /** 破袭者（striker）机体贴图 */
-  let strikerPlayerImg = null;
-  let strikerPlayerImgReady = false;
-  let taffyPlayerImg = null;
-  let taffyPlayerImgReady = false;
-  let normalEnemyImg = null;
-  let normalEnemyImgReady = false;
-  /** 轨道卫星（词条/机械师）默认外观；吸血鬼仍用 satellite_vampire */
   let orbitSatelliteImg = null;
   let orbitSatelliteImgReady = false;
-  let eliteEnemyImg = null;
-  let eliteEnemyImgReady = false;
-  if (character && character.id === "striker" && typeof wx !== "undefined" && typeof wx.createImage === "function") {
-    try {
-      strikerPlayerImg = wx.createImage();
-      strikerPlayerImg.onload = () => { strikerPlayerImgReady = true; };
-      strikerPlayerImg.onerror = () => { strikerPlayerImgReady = false; };
-      strikerPlayerImg.src = "subpackages/pkg_assets/images/character_striker.png";
-    } catch (e) {
-      strikerPlayerImg = null;
-      strikerPlayerImgReady = false;
-    }
-  }
-  if (character && character.id === "taffy" && typeof wx !== "undefined" && typeof wx.createImage === "function") {
-    try {
-      taffyPlayerImg = wx.createImage();
-      taffyPlayerImg.onload = () => { taffyPlayerImgReady = true; };
-      taffyPlayerImg.onerror = () => { taffyPlayerImgReady = false; };
-      taffyPlayerImg.src = "subpackages/pkg_assets/images/character_taffy.png";
-    } catch (e) {
-      taffyPlayerImg = null;
-      taffyPlayerImgReady = false;
-    }
-  }
-  if (character && character.id === "vampire" && typeof wx !== "undefined" && typeof wx.createImage === "function") {
-    try {
-      vampireSatelliteImg = wx.createImage();
-      vampireSatelliteImg.onload = () => { vampireSatelliteImgReady = true; };
-      vampireSatelliteImg.onerror = () => { vampireSatelliteImgReady = false; };
-      vampireSatelliteImg.src = "subpackages/pkg_assets/images/satellite_vampire.png";
-    } catch (e) {
-      vampireSatelliteImg = null;
-      vampireSatelliteImgReady = false;
-    }
-  }
-  if (typeof wx !== "undefined" && typeof wx.createImage === "function") {
-    try {
-      normalEnemyImg = wx.createImage();
-      normalEnemyImg.onload = () => { normalEnemyImgReady = true; };
-      normalEnemyImg.onerror = () => { normalEnemyImgReady = false; };
-      normalEnemyImg.src = "subpackages/pkg_assets/images/enemy_grunt.png";
-    } catch (e) {
-      normalEnemyImg = null;
-      normalEnemyImgReady = false;
-    }
+  let satelliteTexturesRequested = false;
+
+  function ensureSatelliteTextures() {
+    if (satelliteTexturesRequested || !battleTexturesEnabled()
+      || typeof wx === "undefined" || typeof wx.createImage !== "function") return;
+    satelliteTexturesRequested = true;
     try {
       orbitSatelliteImg = wx.createImage();
       orbitSatelliteImg.onload = () => { orbitSatelliteImgReady = true; };
       orbitSatelliteImg.onerror = () => { orbitSatelliteImgReady = false; };
       orbitSatelliteImg.src = "subpackages/pkg_assets/images/satellite_orbital.png";
+      if (isVampire) {
+        vampireSatelliteImg = wx.createImage();
+        vampireSatelliteImg.onload = () => { vampireSatelliteImgReady = true; };
+        vampireSatelliteImg.onerror = () => { vampireSatelliteImgReady = false; };
+        vampireSatelliteImg.src = "subpackages/pkg_assets/images/satellite_vampire.png";
+      }
     } catch (e) {
-      orbitSatelliteImg = null;
-      orbitSatelliteImgReady = false;
-    }
-    try {
-      eliteEnemyImg = wx.createImage();
-      eliteEnemyImg.onload = () => { eliteEnemyImgReady = true; };
-      eliteEnemyImg.onerror = () => { eliteEnemyImgReady = false; };
-      eliteEnemyImg.src = "subpackages/pkg_assets/images/enemy_elite.png";
-    } catch (e) {
-      eliteEnemyImg = null;
-      eliteEnemyImgReady = false;
+      satelliteTexturesRequested = false;
     }
   }
 
-  /** 是否绘制战斗内可选贴图（敌人/破袭者/卫星等）；永雏塔菲立绘不受此开关影响 */
+  /** 所有战机、敌人和卫星统一遵循贴图开关。 */
   function battleTexturesEnabled() {
     return storage.get().battleTexturesOn === true;
   }
 
   // 把存档里的天赋等级转成战斗加成
   const save = storage.get();
+  /** 本局地图（菜单里选、存档记住；见 maps.js）：决定背景色带与远景颗粒风格 */
+  const battleMap = resolveSelectedMap(save);
+  const mapThemes = (battleMap && battleMap.themes && battleMap.themes.length)
+    ? battleMap.themes
+    : THEMES;
   audio.setEnabled(save.musicOn !== false);
   audio.setVolume(save.musicVolume == null ? 1 : save.musicVolume);
   // 每局开场都从头播放 BGM（不沿用上一局播放进度）
@@ -329,6 +311,11 @@ function createBattleScene(options) {
   const state = {
     characterId: character && character.id, // 供局内升级判断（如机械师自带的卫星线与「轨道卫星」词条）
 
+    windCharge: 0,
+    windBurstMs: 0,
+    tideVolleyCount: 0,
+    newCharacterUnlockedName: "",
+
     // 计时器（毫秒）
     elapsed: 0,                          // 累计游玩时长
     waveIndex: 1,                        // 当前波次（从 1 开始）
@@ -344,6 +331,8 @@ function createBattleScene(options) {
     godMode: false,                      // DEV 调试：本局无敌（不受敌弹/撞机伤害）
     devOneHitKill: false,                 // DEV：伤害至少清空目标当前生命值（核心锁/Cutscene 除外）
     devTimeScale: 1,                     // DEV：逻辑时间缩放（如 10 倍速）
+    /** DEV：各机制的强制态 { 机制id: "auto"|档位 }，见 mechanics.js devModes */
+    devMechanics: {},
 
     bossDropTimer: 0,                    // Boss 战中道具周期掉落计时
     bossDropNextMs: 6000,                // 距离下次 Boss 战道具掉落的随机间隔
@@ -388,11 +377,15 @@ function createBattleScene(options) {
     expMul: bonuses.expMul,              // 经验倍率（来自智慧天赋）
     dropBase: 0.05 + bonuses.dropBonus,  // 普通敌机基础掉落率（5% + 幸运加成）
     dropLevelUpChance: 0,               // 敌机阵亡时额外掉落 LV+ 道具概率（战术学习III）
+    levelUpSupply: false,               // 「空投信标」：拾取后本局剩余时间内定期空投 LV+ 升级包
+    levelUpSupplyTimer: 0,              // 空投计时
+    levelUpSupplyNextMs: 40000,         // 距下次空投的随机间隔
     eliteGuaranteedDrop: false,          // 拿到“战利品雷达”后为 true（精英必掉道具）
 
     // ---------- 升级新机制（默认值，被 upgrades.js 中词条增益） ----------
     critRate: 0,                         // 暴击率 0~1
-    critMult: 1.5,                       // 暴击倍率
+    critMult: 1.5,                       // 暴击倍率（连乘部分）
+    critOverflowRate: 0,                 // 超过 95% 上限的暴击累计量；换算成爆伤加算，见 effectiveCritMult
     vampRate: isVampire ? 0.03 : 0,      // 吸血比例（吸血鬼自带 3%）
     vampPool: 0,                         // 吸血小数累积池
     bulletSizeMul: 1,                    // 子弹尺寸倍率
@@ -466,6 +459,7 @@ function createBattleScene(options) {
     // 暂停 / 结束 标记
     pausedForUpgrade: false,
     upgradePanelAnimMs: 0,               // 升级面板动画计时（暂停时也递增）
+    autoRewardToastMs: 0,                // 进化池抽空后的"自动补给"HUD 提示剩余时长
     upgradeOptions: [],
     upgradeRerollLeft: Math.max(0, Math.floor(bonuses.rerollCount || 0)),
     upgradePruneLeft: Math.max(0, Math.floor(bonuses.pruneCount || 0)),
@@ -486,16 +480,67 @@ function createBattleScene(options) {
     endlessEnemyDmgMulCached: 1,
     pauseRequested: false,
 
-    // 当前主题（每波切换）
-    theme: THEMES[0],
-    themeFrom: THEMES[0],
-    themeTo: THEMES[0],
+    // ---------- 本局地图（见 maps.js） ----------
+    mapId: battleMap ? battleMap.id : "starfield",
+    mapName: battleMap ? battleMap.name : "星空",
+    mapParticle: battleMap && battleMap.particle ? battleMap.particle : "star",
+    mapEnemyPool: (battleMap && battleMap.enemyPool) || "starfield",
+    mapEliteType: (battleMap && battleMap.eliteType) || "elite",
+    /** 本图启用的机制配置 { 机制id: cfg }，见 mechanics.js */
+    mapMechanics: (battleMap && battleMap.mechanics) || {},
+    /** Boss 战期间机制挂起（沙暴等交给 Boss 招式主动召唤） */
+    mechanicsSuspended: false,
+    mapSandSea: !!(battleMap && battleMap.sandSea),
+    mapLoot: (battleMap && battleMap.loot) || null,
+
+    // ---------- 旱魃（沙漠 Boss）写入的场地状态 ----------
+    bossStormActive: false,              // Boss 主动召唤的沙暴
+    bossStormAlpha: 0,
+    bossStormVisionR: 0,
+    quicksandZones: null,                // 生效中的流沙区（踩上去减速）
+    quicksandWarnZones: null,            // 预警中的流沙区（尚不生效）
+    hanbaDashWarn: null,                 // 尘暴冲撞的路径预警
+    hanbaSpikeWarn: null,                // 裂地矛的升起预警
+    hanbaVortexAt: null,                 // 旋沙中心
+
+    // ---------- 机制字段（各机制自己声明默认值，见 mechanics.js） ----------
+    ...mechanicDefaults(),
+    /** 沙暴配置的快捷引用；没启用该机制时为 null */
+    sandstormCfg: (battleMap && battleMap.mechanics && battleMap.mechanics.sandstorm) || null,
+    tideCfg: (battleMap && battleMap.mechanics && battleMap.mechanics.tide) || null,
+    grasslandCfg: (battleMap && battleMap.mechanics && battleMap.mechanics.grasslandHabitat) || null,
+
+    /** Boss 出招期间为 true：同屏杂兵/精英停火，避免两层弹幕叠死安全走廊 */
+    addFireSuppressed: false,
+
+    // ---------- 沙漠专属词条（见 upgrades.js 的 options.maps 组） ----------
+    stormFireRateMul: 1,        // 逆风者：沙暴期射速倍率
+    stormClearSight: false,     // 沙镜 / 沙暴之眼：沙暴期敌人不再随距离淡化
+    heatDeathPerTenth: 0,       // 热寂：敌人每快 10% 移速带来的增伤
+    quicksandBind: false,       // 流沙缚：拾取范围内敌人额外减速
+    stormEyeRegenRatio: 0,      // 沙暴之眼：沙暴期每秒回血比例
+    stormEyeRegenAccMs: 0,
+    stormDurationMul: 1,        // 旱魃之息：沙暴持续倍率
+    stormDamageMul: 1,          // 旱魃之息：沙暴期全伤害倍率
+    stormCoinMul: 1,            // 拾荒者：沙暴期拾取金币倍率
+    erosionPerStack: 0,         // 风蚀：每层易伤
+    erosionMaxStacks: 0,        // 风蚀：最大层数
+    newMapUnlockedName: "",              // 本局新解锁的地图名（结算界面提示用）
+
+    // 当前主题（每波切换，色带来自地图）
+    theme: mapThemes[0],
+    themeFrom: mapThemes[0],
+    themeTo: mapThemes[0],
     themeBlendT: 1,                       // 0=from, 1=to
     themeBlendLeftMs: 0,                  // >0 时每帧推进 blend
   };
 
   /** 本局经济是否已写入存档；无尽接续后清零以便再次结算 */
   let runEconomySettled = false;
+  if (state.characterId === "tidecaller") {
+    state.shieldMaxHp = state.maxHp * 0.2;
+    state.shieldHp = state.shieldMaxHp;
+  }
 
   /** 超限血条叠层上限（与 drawHud 中叠条数量一致）；实际 hp/maxHp 不可超过基准 + 此层数倍率 */
   const MAX_OVERFLOW_HP_LAYERS = 10;
@@ -524,6 +569,9 @@ function createBattleScene(options) {
     const cx = p.x + p.w / 2;
     const sz = state.bulletSizeMul;
     const sp = state.bulletSpeedMul;
+    const windVolley = consumeWindVolley(state);
+    const volleyDamage = state.bulletDamage * (windVolley ? 1.8 : 1) * consumeGrassAmbush(state);
+    const volleyPierce = state.bulletPierceEnemies || windVolley;
 
     // 主弹
     const mainW = 6 * sz;
@@ -536,8 +584,10 @@ function createBattleScene(options) {
       h: mainH,
       vx: 0,
       vy: -8.5 * sp,
-      dmg: state.bulletDamage,
-      pierceEnemies: state.bulletPierceEnemies,
+      dmg: volleyDamage,
+      windVolley,
+      color: windVolley ? "#cef2a5" : undefined,
+      pierceEnemies: volleyPierce,
       pierceLeft: 0,
     });
 
@@ -553,8 +603,10 @@ function createBattleScene(options) {
         h: sh,
         vx: -spread * sp,
         vy: -7.8 * sp,
-        dmg: state.bulletDamage,
-        pierceEnemies: state.bulletPierceEnemies,
+        dmg: volleyDamage,
+        windVolley,
+        color: windVolley ? "#cef2a5" : undefined,
+        pierceEnemies: volleyPierce,
         pierceLeft: 0,
       });
       state.bullets.push({
@@ -564,9 +616,30 @@ function createBattleScene(options) {
         h: sh,
         vx: spread * sp,
         vy: -7.8 * sp,
-        dmg: state.bulletDamage,
-        pierceEnemies: state.bulletPierceEnemies,
+        dmg: volleyDamage,
+        windVolley,
+        color: windVolley ? "#cef2a5" : undefined,
+        pierceEnemies: volleyPierce,
         pierceLeft: 0,
+      });
+    }
+    appendTidecallerBolts();
+  }
+
+  function appendTidecallerBolts() {
+    if (state.characterId !== "tidecaller") return;
+    state.tideVolleyCount = (state.tideVolleyCount || 0) + 1;
+    if (state.tideVolleyCount < 4) return;
+    state.tideVolleyCount = 0;
+    const p = state.player, cx = p.x + p.w / 2;
+    const target = findNearestEnemy(cx, p.y);
+    for (const side of [-1, 1]) {
+      state.bullets.push({
+        x: cx + side * 15 - 4, y: p.y - 8, w: 8, h: 14,
+        vx: side * 2.1, vy: -6.6, dmg: state.bulletDamage * 1.4,
+        pierceEnemies: false, pierceLeft: 0,
+        homing: true, homingTurn: 0.13, homingSpeed: 7.2,
+        homingTargetRef: target, tidecallerBolt: true, color: "#9aeeee",
       });
     }
   }
@@ -595,6 +668,27 @@ function createBattleScene(options) {
   const ENDLESS_DMG_EXP_BASE = 1.055;
   /** 无尽：每完成一个轮回（回到阶段一）小怪刷新频率再上 20%（乘在 curse 与小怪计时除数上） */
   const ENDLESS_LAP_SPAWN_MUL = 1.2;
+
+  /**
+   * 虚空线 Boss（隐藏 Boss）通关结算：
+   *   1) 永久解锁「沙漠」地图（见 maps.js unlockBy: "hiddenBoss"）
+   *   2) 返回是否需要在胜利界面询问接续无尽
+   */
+  function resolveBossVictory(enemy) {
+    const expected = battleMap && (battleMap.bossVariant === enemy.bossVariant
+      || (battleMap.bossVariant === "random" && ((battleMap.randomBossPool || []).includes(enemy.bossVariant) || isVoidLineBoss(enemy))));
+    if (expected) {
+      const rewards = storage.recordMapClear(state.mapId);
+      if (rewards.maps.length) state.newMapUnlockedName = rewards.maps.map((m) => m.name).join("、");
+      if (rewards.characters.length) state.newCharacterUnlockedName = rewards.characters.map((c) => c.name).join("、");
+    }
+    if (!isVoidLineBoss(enemy)) return false;
+    // 解锁所有"以击败隐藏 Boss 为条件"的地图；不写死 id，加新图自动生效
+    mapsUnlockedByHiddenBoss().forEach((m) => {
+      if (storage.unlockMap(m.id)) state.newMapUnlockedName = m.name;
+    });
+    return true;
+  }
 
   function isVoidLineBoss(enemy) {
     return !!enemy && (
@@ -668,14 +762,27 @@ function createBattleScene(options) {
 
   /** 第一波：普通敌机 */
   function spawnRegular() {
-    const e = spawnEnemyForWave(state.waveIndex, Math.max(1, state.level));
+    const spawned = spawnEnemyForWave(
+      state.waveIndex,
+      Math.max(1, state.level),
+      state.mapEnemyPool,
+    );
+    // 沙蜂是成组生成的，工厂会返回数组
+    if (Array.isArray(spawned)) {
+      spawned.forEach((one) => {
+        applyEnemyCurseHp(one);
+        state.enemies.push(one);
+      });
+      return;
+    }
+    const e = spawned;
     applyEnemyCurseHp(e);
     state.enemies.push(e);
   }
 
   /** 第二波：强化精英敌机（血厚+攻击频率高） */
   function spawnWave2Elite() {
-    const elite = createElite(Math.max(4, state.level));
+    const elite = createEliteFor(state.mapEliteType, Math.max(4, state.level));
     elite.hp = Math.floor(elite.hp * 1.2);
     elite.maxHp = elite.hp;
     elite.speed += 0.2;
@@ -689,14 +796,13 @@ function createBattleScene(options) {
   /** 第三波：超高难 Boss（由 bossAi.js 驱动） */
   /** 第三波主 Boss 仅红/蓝；虚空为隐藏 Boss（满血击败红/蓝后进入） */
   function spawnBoss() {
-    const variant = forcedBossVariant || (Math.random() < 0.5 ? "azure" : "crimson");
+    const variant = forcedBossVariant || pickMapBossVariant(battleMap);
     const boss = createBoss(variant, Math.max(1, state.level));
     applyEnemyCurseHp(boss);
     initBossSegmentedHpBar(boss);
     // Boss 基础血量在 enemies.js 定义；诅咒天赋在此处叠乘
     boss.speed = 1.6;
-    boss.targetY = 90;
-    boss.homeY = 90;
+    boss.homeY = boss.targetY;
     boss.coin = 300;
     state.enemies.push(boss);
     state.bossActive = true;
@@ -717,7 +823,7 @@ function createBattleScene(options) {
     if (enemy.bossVariant === "void") return "win";
     /** 含无尽模式：满血击败红/蓝仍可进隐藏虚空，虚空线与核心击败后照旧回阶段一做周回 */
     if (
-      (enemy.bossVariant === "crimson" || enemy.bossVariant === "azure")
+      bossLeadsToHidden(enemy.bossVariant)
       && playerHpFullForHiddenVoidGate()
       && !state.hiddenVoidConsumed
     ) {
@@ -807,6 +913,18 @@ function createBattleScene(options) {
 
   /** Boss 召唤小怪：支持默认冲撞型与“左右柱状普通敌人”两种模式 */
   function spawnBossAdd(boss, cfg) {
+    if (cfg && cfg.pattern === "grassHerd") {
+      if (state.enemies.filter((e) => e && !e.isBoss && e.hp > 0).length >= 4) return null;
+      const make = cfg.type === "thornBloom" ? createThornBloom : createGaleFalcon;
+      const add = make(Math.max(1, state.level));
+      add.x = Math.max(8, Math.min(W - add.w - 8, cfg.x));
+      add.y = Math.max(175, Math.min(H * 0.6, cfg.y));
+      add.grassOwnerBoss = cfg.owner || boss;
+      add.grassHerdAdd = true;
+      applyEnemyCurseHp(add);
+      state.enemies.push(add);
+      return add;
+    }
     if (cfg && cfg.pattern === "sideColumns") {
       const rows = Math.max(10, cfg.rows || 14);
       const gap = 26;
@@ -948,8 +1066,160 @@ function createBattleScene(options) {
     }
   }
 
+  /**
+   * Boss 战期间的"弹幕分层"：Boss 出招时，同屏杂兵与精英**停火**。
+   *
+   * 为什么需要：Boss 战每 1.2 秒还在刷怪（最多 4 只，15% 概率是精英），
+   * 它们的弹幕和 Boss 招式叠在一起时，Boss 招式里精心留出的安全走廊会被填掉——
+   * 走位路线直接失效，只剩"靠回血硬吃"一条路。
+   *
+   * 怎么做到不降压力：只是把两层弹幕**串行化**而不是删掉。
+   *   · Boss 出招时杂兵不开火，但照样移动、照样撞人、照样得清；
+   *   · Boss 招式之间的空隙、以及**过热破绽窗口**里，杂兵恢复开火——
+   *     于是"趁破绽输出"本身带上了代价，破绽窗口不再是白送的。
+   */
+  function updateAddFireSuppression() {
+    let suppressed = false;
+    for (let i = 0; i < state.enemies.length; i += 1) {
+      const e = state.enemies[i];
+      if (!e || !e.isBoss || e.inCutscene) continue;
+      // 过热破绽期不压制：这是玩家的输出窗口，也该有代价
+      if (e.hanbaOverheat) continue;
+      // 招式进行中（红/旱魃看 currentAttack；蓝的模式机常驻，看是否在重型模式）
+      if (e.currentAttack) { suppressed = true; break; }
+      // 常驻输出型（蓝的模式机、虚空线）没有出招间隙，全程压制
+      if (bossIsContinuous(e.bossVariant) || e.isVoidCore) { suppressed = true; break; }
+    }
+    state.addFireSuppressed = suppressed;
+  }
+
+  // ==========================================================================
+  //  沙暴：周期性风险窗口（平静 → 预警 → 沙暴 → 平静…）
+  //  代价是视野收缩 + 敌人加速，回报是经验与掉落加成。
+  //  Boss 战期间常规循环挂起，交给 Boss 招式主动召唤（第二批实现旱魃时接上）。
+  // ==========================================================================
+
+  function mechanicsSuspendedNow() {
+    return !!(state.bossActive && state.wave3BossSpawned);
+  }
+
+  /**
+   * 机制统一驱动：走一遍本图启用的机制，各自推进自己的 state 字段。
+   * 加一个新机制 = mechanics.js 加一项 + 地图 mechanics 里引用，这里不用改。
+   */
+  function updateMechanics(dt) {
+    const tideWasActive = state.tideActive;
+    state.mechanicsSuspended = mechanicsSuspendedNow();
+    const ids = Object.keys(state.mapMechanics);
+    for (let i = 0; i < ids.length; i += 1) {
+      const m = getMechanic(ids[i]);
+      if (!m) continue;
+      const cfg = state.mapMechanics[ids[i]];
+      const devMode = (state.devMechanics && state.devMechanics[m.id]) || "auto";
+      if (devMode !== "auto" && m.applyDev && m.applyDev(state, devMode, cfg)) continue;
+      if (m.update) m.update(state, dt, cfg);
+    }
+    if (state.grasslandCfg) applyGrasslandRewards();
+    // 潮汐在 Boss 战继续循环；收益、横流与海克斯在同一帧结算。
+    if (!state.tideCfg) return;
+    if (tideWasActive && !state.tideActive && state.tideEndHealRatio > 0) {
+      healPlayer(state.maxHp * state.tideEndHealRatio);
+    }
+    if (!tideWasActive && state.tideActive && state.tideHeart) {
+      state.enemyBullets = [];
+      const gain = state.maxHp * state.tideHeartShieldRatio;
+      state.shieldMaxHp = Math.max(state.shieldMaxHp, gain);
+      state.shieldHp = Math.min(state.shieldMaxHp, state.shieldHp + gain);
+      state.shieldFlashMs = state.flashEffectsOn ? 240 : 0;
+    }
+    if (state.tideActive) {
+      const p = state.player;
+      const prevX = p.x;
+      const drift = state.tideDirection * state.tideCfg.driftPxPerSec * state.tideDriftMul * dt / 1000;
+      p.x = Math.max(0, Math.min(W - p.w, p.x + drift));
+      // 维持拖拽锚点，避免下一次触摸移动将洋流位移突然复位。
+      if (state.touchActive) state.touchOffsetX -= p.x - prevX;
+      chargeWindrunner(state, prevX, p.y);
+    }
+  }
+
+  function applyGrasslandRewards() {
+    const rewards = consumeGrasslandRewards(state);
+    if (rewards.healAmount > 0) healPlayer(rewards.healAmount);
+    if (rewards.shieldAmount > 0) {
+      state.shieldMaxHp = Math.max(state.shieldMaxHp, rewards.shieldAmount);
+      state.shieldHp = Math.min(state.shieldMaxHp, state.shieldHp + rewards.shieldAmount);
+      state.shieldFlashMs = state.flashEffectsOn ? 240 : 0;
+    }
+  }
+
+  function mapDamageMul() {
+    return (state.tideActive ? (state.tideDamageMul || 1) : 1);
+  }
+
+  /**
+   * Boss 战期间常规沙暴挂起，改由旱魃的招式召唤。
+   * 两者取较强的一方生效，这样 P3 常驻弱沙暴与 callStorm 的浓沙暴能平滑衔接。
+   */
+  function applyBossStormOverride() {
+    if (!state.sandstormCfg || !state.bossStormActive) return;
+    const a = state.bossStormAlpha || 0;
+    if (a > state.sandstormAlpha) {
+      state.sandstormAlpha = a;
+      state.sandstormVisionR = state.bossStormVisionR || state.sandstormCfg.visionR;
+      state.sandstormActive = true;
+      state.sandstormMoveMul = state.sandstormCfg.enemyMoveMul || 1;
+      state.sandstormAimSpreadDeg = state.sandstormCfg.aimSpreadDeg || 0;
+    }
+  }
+
+  /** 「风蚀」：命中后给敌人叠一层易伤，超时自动过期 */
+  const EROSION_DURATION_MS = 4000;
+  function applyErosionStack(enemy) {
+    if (!(state.erosionPerStack > 0)) return;
+    if (!enemy.erosionUntil || state.elapsed > enemy.erosionUntil) enemy.erosionStacks = 0;
+    enemy.erosionStacks = Math.min(state.erosionMaxStacks || 0, (enemy.erosionStacks || 0) + 1);
+    enemy.erosionUntil = state.elapsed + EROSION_DURATION_MS;
+  }
+
+  /** 目标身上的风蚀易伤倍率（过期即失效） */
+  function erosionMul(enemy) {
+    if (!(state.erosionPerStack > 0)) return 1;
+    if (!enemy.erosionUntil || state.elapsed > enemy.erosionUntil) return 1;
+    return 1 + (enemy.erosionStacks || 0) * state.erosionPerStack;
+  }
+
+  /**
+   * 沙漠专属词条的伤害倍率：
+   *   热寂     —— 敌人移速每高 10% 就 +heatDeathPerTenth 伤害（沙暴期敌人 ×1.5 移速 → +40%）
+   *   旱魃之息 —— 沙暴期间全部伤害额外 ×stormDamageMul
+   * 非沙漠地图这两个字段都取不到，恒返回 1。
+   */
+  function desertDamageMul() {
+    let mul = 1;
+    const per = state.heatDeathPerTenth || 0;
+    if (per > 0) {
+      const over = Math.max(0, (state.sandstormMoveMul || 1) - 1);
+      mul *= 1 + (over / 0.1) * per;
+    }
+    if (state.sandstormActive && (state.stormDamageMul || 1) !== 1) {
+      mul *= state.stormDamageMul;
+    }
+    return mul;
+  }
+
+  /** 沙暴期的收益加成（风险回报），无沙暴地图恒为 1 / 0 */
+  function sandstormExpMul() {
+    const cfg = state.sandstormCfg;
+    return state.sandstormActive && cfg ? (cfg.expMul || 1) : 1;
+  }
+  function sandstormDropBonus() {
+    const cfg = state.sandstormCfg;
+    return state.sandstormActive && cfg ? (cfg.dropBonus || 0) : 0;
+  }
+
   function applyTheme(instant) {
-    const next = THEMES[(state.waveIndex - 1) % THEMES.length];
+    const next = mapThemes[(state.waveIndex - 1) % mapThemes.length];
     if (instant || !state.theme) {
       state.theme = next;
       state.themeFrom = next;
@@ -994,7 +1264,9 @@ function createBattleScene(options) {
    * 例：5 → 13 → 24 → 39 → 60 → 90 ...
    */
   function gainExp(amount) {
-    const real = Math.max(1, Math.round(amount * state.expMul));
+    const tideExp = state.tideActive && state.tideCfg
+      ? (state.tideCfg.expMul || 1) * (state.tideExpMul || 1) : 1;
+    const real = Math.max(1, Math.round(amount * state.expMul * sandstormExpMul() * tideExp));
     state.exp += real;
     while (state.exp >= state.expToNext) {
       state.exp -= state.expToNext;
@@ -1105,7 +1377,25 @@ function createBattleScene(options) {
     }
   }
 
+  /** 进化池抽空后每级自动发放的金币 */
+  const AUTO_LEVEL_REWARD_COINS = 100;
+
+  /**
+   * 不可重复的进化全部拿完后，升级不再弹三选一，直接结算补给：
+   * 回满生命（溢出照常走「超量血库」）+ 100 金币，并在 HUD 提示一行。
+   */
+  function grantAutoLevelReward() {
+    healPlayer(state.maxHp);
+    grantRunCoins(state, AUTO_LEVEL_REWARD_COINS);
+    state.autoRewardToastMs = 1800;
+  }
+
   function openUpgradePanel() {
+    // 池已抽空：不打断游戏，直接自动补给（可重复词条不算"还有得选"，见 hasAnyUpgradeAvailable）
+    if (!hasAnyUpgradeAvailable(state)) {
+      grantAutoLevelReward();
+      return;
+    }
     state.pausedForUpgrade = true;
     state.upgradePruneArmed = false;
     state.upgradePruneFx = null;
@@ -1120,12 +1410,12 @@ function createBattleScene(options) {
     if (!state._upgradeMeta.blocked) state._upgradeMeta.blocked = Object.create(null);
     for (let i = 0; i < opts.length; i += 1) {
       const o = opts[i];
-      if (!o || !o.id || o.isPostPoolReward) continue;
+      if (!o || !o.id || o.isPostPoolReward || o.repeatable) continue;
       state._upgradeMeta.blocked[o.id] = true;
     }
   }
 
-  /** 永雏塔菲：选定一条时，同屏其余进化词条视为未选并剔除（补给除外） */
+  /** 永雏塔菲：选定一条时，同屏其余进化词条视为未选并剔除（补给与可重复词条除外） */
   function blockTaffyUnpickedSiblings(pickedIndex) {
     if (state.characterId !== "taffy") return;
     const opts = state.upgradeOptions;
@@ -1135,7 +1425,7 @@ function createBattleScene(options) {
     for (let i = 0; i < opts.length; i += 1) {
       if (i === pickedIndex) continue;
       const o = opts[i];
-      if (!o || !o.id || o.isPostPoolReward) continue;
+      if (!o || !o.id || o.isPostPoolReward || o.repeatable) continue;
       state._upgradeMeta.blocked[o.id] = true;
     }
   }
@@ -1190,7 +1480,8 @@ function createBattleScene(options) {
     if (!state.pausedForUpgrade) return;
     if ((state.upgradePruneLeft || 0) <= 0) return;
     const opt = state.upgradeOptions[index];
-    if (!opt || !opt.id || opt.isPostPoolReward) return;
+    // 可重复词条（应急修复 / 高级重掷）不可被剔除，否则"反复刷到"会被一次剔除废掉
+    if (!opt || !opt.id || opt.isPostPoolReward || opt.repeatable) return;
     if (!state._upgradeMeta) state._upgradeMeta = { picked: Object.create(null), blocked: Object.create(null) };
     if (!state._upgradeMeta.blocked) state._upgradeMeta.blocked = Object.create(null);
     state._upgradeMeta.blocked[opt.id] = true;
@@ -1263,11 +1554,14 @@ function createBattleScene(options) {
     if (d.godMode) state.godMode = true;
     if (d.oneHitKill) state.devOneHitKill = true;
     state.devTimeScale = d.gameSpeed10x ? 10 : 1;
-    if (d.startBossVariant === "crimson" || d.startBossVariant === "azure" || d.startBossVariant === "void") {
-      forcedBossVariant = d.startBossVariant;
-    } else {
-      forcedBossVariant = null;
+    // DEV 机制强制态：payload 里带的 mechanics 表直接铺进 state（见 mechanics.js devModes）
+    if (d.mechanics && typeof d.mechanics === "object") {
+      state.devMechanics = Object.assign({}, d.mechanics);
     }
+    // 白名单从 enemies.js 的 BOSS_VARIANTS 派生，避免与 DEV 菜单里的清单走样
+    forcedBossVariant = forceableBossIds().indexOf(d.startBossVariant) >= 0
+      ? d.startBossVariant
+      : null;
     if (Array.isArray(d.forceUpgradeIds) && d.forceUpgradeIds.length > 0) {
       const seen = {};
       forcedUpgradeIds = d.forceUpgradeIds.filter((id) => {
@@ -1381,8 +1675,9 @@ function createBattleScene(options) {
     state.hp = Math.min(effectiveMaxHp, nextHp);
     if (overflow > 0) {
       if (state.overhealToShield) {
-        state.shieldMaxHp += overflow;
-        state.shieldHp += overflow;
+        // 护盾上限与生命上限同源封顶，避免过量治疗把护盾无限撑大
+        state.shieldMaxHp = Math.min(ceiling, state.shieldMaxHp + overflow);
+        state.shieldHp = Math.min(state.shieldMaxHp, state.shieldHp + overflow);
       }
       if (state.overhealToMaxHp) {
         const room = ceiling - state.maxHp;
@@ -1429,8 +1724,71 @@ function createBattleScene(options) {
   /**
    * 击杀回调：仅推进波次（按击杀数），不再触发升级 —— 升级只来自拾取经验球。
    */
+  /** 旱魃「流沙陷阱」：玩家中心落在任一生效流沙区内时的移动倍率 */
+  const QUICKSAND_MOVE_MUL = 0.55;
+  function quicksandMoveMul() {
+    const zones = state.quicksandZones;
+    if (!zones || !zones.length) return 1;
+    const px = state.player.x + state.player.w / 2;
+    const py = state.player.y + state.player.h / 2;
+    for (let i = 0; i < zones.length; i += 1) {
+      const z = zones[i];
+      if (dist2(px, py, z.x, z.y) <= z.r * z.r) return QUICKSAND_MOVE_MUL;
+    }
+    return 1;
+  }
+
+  /** 「流沙缚」：拾取范围内的敌人本帧位移再 ×0.7（与时间流护盾叠乘） */
+  const QUICKSAND_BIND_MUL = 0.7;
+  function applyQuicksandBindSlow(enemy, prevX, prevY) {
+    if (!state.quicksandBind) return;
+    const px = state.player.x + state.player.w / 2;
+    const py = state.player.y + state.player.h / 2;
+    const r = pickupRadiusPx(state);
+    const ex = enemy.x + enemy.w / 2;
+    const ey = enemy.y + enemy.h / 2;
+    if (dist2(px, py, ex, ey) > r * r) return;
+    enemy.x = prevX + (enemy.x - prevX) * QUICKSAND_BIND_MUL;
+    enemy.y = prevY + (enemy.y - prevY) * QUICKSAND_BIND_MUL;
+  }
+
+  /** 沙蠕破土：在本体位置放一圈短程沙柱弹（接触判伤） */
+  function resolveSandwormErupt(enemy) {
+    if (!enemy || !enemy.wormEruptPending) return;
+    enemy.wormEruptPending = 0;
+    const cx = enemy.x + enemy.w / 2;
+    const cy = enemy.y + enemy.h / 2;
+    for (let i = 0; i < 10; i += 1) {
+      const a = (Math.PI * 2 * i) / 10;
+      state.enemyBullets.push({
+        x: cx - 5, y: cy - 5, w: 10, h: 10,
+        vx: Math.cos(a) * 3.6,
+        vy: Math.sin(a) * 3.6,
+        dmg: 1,
+      });
+    }
+  }
+
+  /** 沙丘龟死亡尸爆：以尸体为中心爆散一圈沙弹（deathBurst 决定数量） */
+  function spawnDeathBurst(enemy) {
+    const count = Math.max(0, Math.floor(enemy && enemy.deathBurst) || 0);
+    if (count <= 0) return;
+    const cx = enemy.x + enemy.w / 2;
+    const cy = enemy.y + enemy.h / 2;
+    for (let i = 0; i < count; i += 1) {
+      const a = (Math.PI * 2 * i) / count;
+      state.enemyBullets.push({
+        x: cx - 4, y: cy - 4, w: 8, h: 8,
+        vx: Math.cos(a) * 2.8,
+        vy: Math.sin(a) * 2.8,
+        dmg: 300,   // 与普通敌弹同档（普通敌弹为 dmg:1 × 300）
+      });
+    }
+  }
+
   function onEnemyDefeated(enemy, opts) {
     const skipKillBombItem = opts && opts.skipKillBombItem;
+    spawnDeathBurst(enemy);
     // 击杀奖励（先于波次推进结算）
     // 金币改为仅靠拾取 coin 道具获得；击杀不再直接给金币
     if (state.killHealChance > 0 && Math.random() < state.killHealChance) {
@@ -1465,7 +1823,12 @@ function createBattleScene(options) {
     const cx = enemy.x + enemy.w / 2;
     const cy = enemy.y + enemy.h / 2;
 
-    if (!enemy.noItemDrop) {
+    // 沙漠：普通敌人不再每只必掉经验球（精英/Boss 不受限）
+    const lootCfg = state.mapLoot;
+    const expOrbChance = lootCfg && !enemy.isElite && !enemy.isBoss
+      ? (lootCfg.expOrbChance != null ? lootCfg.expOrbChance : 1)
+      : 1;
+    if (!enemy.noItemDrop && (expOrbChance >= 1 || Math.random() < expOrbChance)) {
       let expType;
       if (enemy.isElite) {
         // 精英经验整体上调约 20%：提高高价值经验球占比
@@ -1476,7 +1839,8 @@ function createBattleScene(options) {
       state.items.push(createItem(cx, cy, expType));
     }
 
-    let dropChance = state.dropBase;
+    let dropChance = (state.dropBase + sandstormDropBonus())
+      * (lootCfg && lootCfg.dropMul != null ? lootCfg.dropMul : 1);
     if (enemy.noItemDrop) dropChance = 0;
     if (enemy.isElite && state.eliteGuaranteedDrop) dropChance = 1;
     if (Math.random() < dropChance) {
@@ -1493,7 +1857,7 @@ function createBattleScene(options) {
 
   /** Boss 死亡：大量经验球 + 一些道具 */
   function dropBossLoot(enemy) {
-    grantRunCoins(state, enemy && enemy.bossVariant === "azure" ? 1000 : 800);
+    grantRunCoins(state, bossCoin(enemy && enemy.bossVariant));
     const cx = enemy.x + enemy.w / 2;
     const cy = enemy.y + enemy.h / 2;
     // 8 颗橙色巨经验球
@@ -1539,7 +1903,9 @@ function createBattleScene(options) {
       // 磁吸道具：持续 5 秒
       state.magnetTimerMs = 5000;
     } else if (item.type === "coin") {
-      grantRunCoins(state, 30);
+      // 拾荒者：击杀早已不直接给金币（金币只从 coin 道具来），所以加成接在拾取上
+      const stormCoin = state.sandstormActive ? (state.stormCoinMul || 1) : 1;
+      grantRunCoins(state, Math.round(30 * stormCoin));
     } else if (item.type === "levelup") {
       // 直接升一级：与经验条 / expMul 无关，拾取后本级进度清空为 0
       const prevNeed = state.expToNext;
@@ -1574,16 +1940,16 @@ function createBattleScene(options) {
         if (enemy.inCutscene && enemy.voidShellCutscene) return;
         if (enemy.bossVariant === "void" && !enemy.phase2Triggered) {
           const hb = enemy.hp;
-          enemy.hp -= 25000;
+          enemy.hp -= 25000 * mapDamageMul();
           notifyBossSegmentLayerBreak(enemy, hb);
           if (enemy.hp <= 0) triggerVoidPhase2(enemy);
           return;
         }
         const hpBomb = enemy.hp;
-        enemy.hp -= 25000; // Boss 扣 25000 血
+        enemy.hp -= 25000 * mapDamageMul(); // 潮汐增伤也适用于炸弹
         notifyBossSegmentLayerBreak(enemy, hpBomb);
       } else if (enemy.isElite) {
-        enemy.hp -= enemy.hp * 0.5; // 精英仅受 50% 当前生命伤害
+        enemy.hp -= enemy.hp * Math.min(1, 0.5 * mapDamageMul());
       } else {
         enemy.hp = 0;
       }
@@ -1601,6 +1967,23 @@ function createBattleScene(options) {
       }
     });
     state.enemies = remaining;
+    // 炸弹也能完成 Boss 击杀，不等待下一发主炮命中才结算。
+    for (let i = state.enemies.length - 1; i >= 0; i -= 1) {
+      const enemy = state.enemies[i];
+      if (!enemy || !enemy.isBoss || enemy.hp > 0 || enemy.inCutscene) continue;
+      const outcome = resolvePrimaryBossDefeat(enemy);
+      if (outcome === "voidPhase2") { triggerVoidPhase2(enemy); continue; }
+      state.kills += 1;
+      dropBossLoot(enemy);
+      state.enemies.splice(i, 1);
+      if (outcome === "hiddenVoid") { spawnHiddenVoidBoss(); return; }
+      if (state.endlessMode) { performEndlessRoundResetToWave1(true); return; }
+      state.offerEndlessAfterVoidWin = resolveBossVictory(enemy);
+      state.win = true;
+      state.gameOver = true;
+      if (!state.offerEndlessAfterVoidWin) finishRun();
+      return;
+    }
   }
 
   /** 虚空一阶段 HP 归零：进入二阶段过场，不胜利、不结算 */
@@ -1815,21 +2198,21 @@ function createBattleScene(options) {
   function getRestartRect() {
     const w = 180;
     const h = 50;
-    return { x: W / 2 - w / 2, y: H / 2 + 30 + UI_SHIFT_Y, w, h };
+    return { x: W / 2 - w / 2, y: H / 2 + 30 + UI_SHIFT_Y + (state.newCharacterUnlockedName ? 36 : 0), w, h };
   }
 
   /** Game Over 面板 - "回到菜单"按钮：在 restart 下方 60 处，宽 180 高 44 */
   function getMenuRect() {
     const w = 180;
     const h = 44;
-    return { x: W / 2 - w / 2, y: H / 2 + 90 + UI_SHIFT_Y, w, h };
+    return { x: W / 2 - w / 2, y: H / 2 + 90 + UI_SHIFT_Y + (state.newCharacterUnlockedName ? 36 : 0), w, h };
   }
 
   /** 胜利且击败虚空 Boss 时：底部红色「无尽模式」 */
   function getEndlessRect() {
     const w = 200;
     const h = 48;
-    return { x: W / 2 - w / 2, y: H / 2 + 142 + UI_SHIFT_Y, w, h };
+    return { x: W / 2 - w / 2, y: H / 2 + 142 + UI_SHIFT_Y + (state.newCharacterUnlockedName ? 36 : 0), w, h };
   }
 
   /** 战斗中右上角"退出"按钮（HUD 中），56x30 */
@@ -1911,6 +2294,7 @@ function createBattleScene(options) {
     const dt =
       delta * Math.max(0.25, Math.min(120, Number(state.devTimeScale) || 1));
     state.upgradePanelAnimMs += dt;
+    state.autoRewardToastMs = Math.max(0, (state.autoRewardToastMs || 0) - dt);
     state.hiddenVoidStrobeMs = Math.max(0, (state.hiddenVoidStrobeMs || 0) - dt);
     if (state.pausedForUpgrade && state.upgradePruneFx) {
       state.upgradePruneFx.ms = Math.max(0, state.upgradePruneFx.ms - dt);
@@ -1925,6 +2309,7 @@ function createBattleScene(options) {
 
     refreshEndlessScaling();
     state.elapsed += dt;
+    state.windBurstMs = Math.max(0, (state.windBurstMs || 0) - dt);
     state.bombFlashMs = Math.max(0, state.bombFlashMs - dt);
     state.magnetTimerMs = Math.max(0, state.magnetTimerMs - dt);
 
@@ -1979,9 +2364,20 @@ function createBattleScene(options) {
       }
     }
 
+    // ---------- 地图机制：在本帧射击前更新涨潮/退潮 ----------
+    updateMechanics(dt);
+    applyBossStormOverride();
+
     // ---------- 玩家自动射击 ----------
+    // 逆风者：只在沙暴期生效，所以是结算时除以倍率，而不是永久改 shootInterval
     state.shootTimer += dt;
-    if (state.shootTimer >= state.shootInterval) {
+    const stormFire = state.sandstormActive ? (state.stormFireRateMul || 1) : 1;
+    const tideFire = state.tideActive ? (state.tideFireRateMul || 1) : 1;
+    const effInterval = Math.max(
+      state.shootIntervalFloor || 80,
+      state.shootInterval / (stormFire * tideFire),
+    );
+    if (state.shootTimer >= effInterval) {
       state.shootTimer = 0;
       fireBullets();
     }
@@ -2030,6 +2426,9 @@ function createBattleScene(options) {
       state.satelliteShotCooldownMs = 0;
     }
 
+    // ---------- Boss 出招时杂兵停火（弹幕分层，见 updateAddFireSuppression）----------
+    updateAddFireSuppression();
+
     // ---------- 自动回血 ----------
     if (state.hasRegen) {
       state.regenTimer += dt;
@@ -2037,6 +2436,17 @@ function createBattleScene(options) {
         state.regenTimer = 0;
         healPlayer(Math.max(1, state.baseMaxHp) * state.regenHealRatio);
       }
+    }
+
+    // ---------- 沙暴之眼：沙暴期每秒回血 ----------
+    if (state.sandstormActive && (state.stormEyeRegenRatio || 0) > 0) {
+      state.stormEyeRegenAccMs += dt;
+      while (state.stormEyeRegenAccMs >= 1000) {
+        state.stormEyeRegenAccMs -= 1000;
+        healPlayer(Math.max(1, state.baseMaxHp) * state.stormEyeRegenRatio);
+      }
+    } else {
+      state.stormEyeRegenAccMs = 0;
     }
 
     // ---------- 护盾修复 ----------
@@ -2058,24 +2468,34 @@ function createBattleScene(options) {
       }
     }
 
-    // ---------- Boss 战中周期性随机掉落道具（包括 LV+ / INV / 普通道具） ----------
+    // ---------- Boss 战中周期性随机掉落道具（INV / 普通道具；LV+ 见「空投信标」） ----------
     if (state.bossActive && state.wave3BossSpawned) {
       state.bossDropTimer += dt;
       if (state.bossDropTimer >= state.bossDropNextMs) {
         state.bossDropTimer = 0;
         state.bossDropNextMs = 7000 + Math.floor(Math.random() * 6000); // 7~13s 随机
-        // 掉落概率分布（总和 100）：升级 22 / 无敌 22 / 治疗 18 / 磁吸 14 / 炸弹 14 / 金币 10
+        // 掉落概率分布（总和 100）：无敌 28 / 治疗 23 / 磁吸 18 / 炸弹 18 / 金币 13
+        // LV+ 不再默认掉落——只有拾取「空投信标」后才会由下面的空投逻辑给出
         const r = Math.random();
         let type;
-        if (r < 0.22) type = "levelup";
-        else if (r < 0.44) type = "invincible";
-        else if (r < 0.62) type = "heart";
-        else if (r < 0.76) type = "magnet";
-        else if (r < 0.90) type = "bomb";
+        if (r < 0.28) type = "invincible";
+        else if (r < 0.51) type = "heart";
+        else if (r < 0.69) type = "magnet";
+        else if (r < 0.87) type = "bomb";
         else type = "coin";
         const dropX = 30 + Math.random() * (W - 60);
         const dropY = -10;
         state.items.push(createItem(dropX, dropY, type));
+      }
+    }
+
+    // ---------- 「空投信标」：拾取后本局剩余时间内不定期空投 LV+ 升级包 ----------
+    if (state.levelUpSupply) {
+      state.levelUpSupplyTimer += dt;
+      if (state.levelUpSupplyTimer >= state.levelUpSupplyNextMs) {
+        state.levelUpSupplyTimer = 0;
+        state.levelUpSupplyNextMs = 35000 + Math.floor(Math.random() * 20000); // 35~55s 随机
+        state.items.push(createItem(30 + Math.random() * (W - 60), -10, "levelup"));
       }
     }
 
@@ -2099,11 +2519,13 @@ function createBattleScene(options) {
           b.vy += (desiredVy - b.vy) * turn;
         }
       }
+      const terrainPrevX = b.x, terrainPrevY = b.y;
       b.x += b.vx;
       b.y += b.vy;
+      if (state.grasslandCfg && interceptGrassBullet(state, b, true, terrainPrevX, terrainPrevY)) b.grassConsumed = true;
     });
     state.bullets = state.bullets.filter(
-      (b) => b
+      (b) => b && !b.grassConsumed
         && typeof b.x === "number"
         && typeof b.y === "number"
         && b.y > -20 && b.y < H + 20 && b.x > -20 && b.x < W + 20
@@ -2112,6 +2534,9 @@ function createBattleScene(options) {
     // ---------- 敌机 AI / 移动 / 射击 ----------
     state.enemies.forEach((enemy) => {
       if (!enemy || typeof enemy.x !== "number") return;
+      // 出生时刻：首次被处理的那一帧即出生帧。用它判断"30 秒后**新生成的**敌人才开火"，
+      // 避免已经在场上的敌人到 30 秒突然一起开火。
+      if (typeof enemy.spawnElapsed !== "number") enemy.spawnElapsed = state.elapsed;
       if (enemy.isMirror) {
         const owner = enemy.ownerBossRef;
         if (!owner || owner.hp <= 0) return;
@@ -2152,6 +2577,15 @@ function createBattleScene(options) {
         const prevX = enemy.x;
         const prevY = enemy.y;
         updateEnemy(enemy, dt, state);
+        if (enemy.wormEruptPending) resolveSandwormErupt(enemy);
+        // 沙暴：只放大本帧的位移量，不改敌弹速度
+        const stormMul = state.sandstormMoveMul || 1;
+        if (stormMul !== 1) {
+          enemy.x = prevX + (enemy.x - prevX) * stormMul;
+          enemy.y = prevY + (enemy.y - prevY) * stormMul;
+        }
+        // 流沙缚：拾取范围内额外减速 30%（与时间流护盾叠乘）
+        applyQuicksandBindSlow(enemy, prevX, prevY);
         applyTimeflowEnemyDisplacementSlow(state, enemy, prevX, prevY);
         const pushEnemyBullet = (b) => {
           state.enemyBullets.push(
@@ -2162,9 +2596,11 @@ function createBattleScene(options) {
         // 原有：射手/精英的开火逻辑
         maybeFire(enemy, dt, state, pushEnemyBullet);
 
-        // 新增：30 秒后，普通敌人（非精英、非射手）也会单发射击
-        const isNormalEnemy = !enemy.isElite && enemy.type !== "shooter";
-        if (isNormalEnemy && state.elapsed >= 30000) {
+        // 开局 30 秒之后**新生成的**普通敌人会额外单发射击（响尾炮也算普通敌人，
+        // 在自己的弹墙之外还会补这一发）。按出生时刻判定，已在场上的敌人不会突然开火。
+        // 排除：精英 / 射手（有专职射击行为）/ 标了 neverFires 的纯冲撞型（沙蜂、掠沙者）
+        const isNormalEnemy = !enemy.isElite && enemy.type !== "shooter" && !enemy.neverFires;
+        if (isNormalEnemy && enemy.spawnElapsed >= 30000 && !state.addFireSuppressed) {
           if (typeof enemy.normalFireCooldown !== "number") {
             enemy.normalFireCooldown = 1000 + Math.random() * 800;
           }
@@ -2270,11 +2706,25 @@ function createBattleScene(options) {
         const by = b.y + (b.h || 0) / 2;
         if (dist2(pCxTimeflow, pCyTimeflow, bx, by) < tfRsq) mul = TIMEFLOW_SHIELD_MOVE_MUL;
       }
-      b.x += b.vx * mul;
-      b.y += b.vy * mul;
+      const tideSpeed = state.tideActive ? (state.tideEnemyBulletSpeedMul || 1) : 1;
+      const terrainPrevX = b.x, terrainPrevY = b.y;
+      b.x += b.vx * mul * tideSpeed;
+      b.y += b.vy * mul * tideSpeed;
+      if (b.grassBall) {
+        b.grassBallAngle = (b.grassBallAngle || 0) + b.vx * 0.05;
+        if (b.x < 0 || b.x + b.w > W) {
+          if (b.bounces > 0) {
+            b.x = Math.max(0, Math.min(W - b.w, b.x));
+            b.vx *= -1;
+            b.bounces -= 1;
+          } else b.grassConsumed = true;
+        }
+      }
+      if (state.grasslandCfg && !b.grassConsumed && interceptGrassBullet(state, b, false, terrainPrevX, terrainPrevY)) b.grassConsumed = true;
     });
+    if (state.grasslandCfg) applyGrasslandRewards();
     state.enemyBullets = state.enemyBullets.filter((b) => {
-      if (!b || typeof b.x !== "number" || typeof b.y !== "number") return false;
+      if (!b || b.grassConsumed || typeof b.x !== "number" || typeof b.y !== "number") return false;
       if (b.judgementBolt && state.finalJudgementPetalMs > 0) {
         return b.y > -200 && b.y < H + 200 && b.x > -140 && b.x < W + 140;
       }
@@ -2406,17 +2856,26 @@ function createBattleScene(options) {
           state.enemies.splice(ei, 1);
           continue;
         }
+        if (enemy.untargetable) continue;   // 掘地者潜沙期：子弹穿过去
         if (!rectHit(bullet, enemy)) continue;
         if (enemy.isBoss && enemy.inCutscene) continue;
         const voidCoreLocked = enemy.isVoidCore && state.elapsed < (state.voidCoreUnlockAt || 0);
 
         // 计算最终伤害：暴击 + 对 Boss/精英 倍率
-        let dmg = bullet.dmg;
+        let dmg = bullet.dmg * grassDamageTakenMul(enemy, bullet);
         if (state.critRate > 0 && Math.random() < state.critRate) {
-          dmg = Math.max(1, Math.floor(dmg * state.critMult));
+          dmg = Math.max(1, Math.floor(dmg * effectiveCritMult(state)));
         }
         if (enemy.isBoss) dmg = Math.max(1, Math.floor(dmg * state.bossDmgMul));
         else if (enemy.isElite) dmg = Math.max(1, Math.floor(dmg * state.eliteDmgMul));
+        // Boss 自身的易伤窗口（旱魃过热破绽期 ×1.6），由 bossAi 写入
+        if (enemy.damageTakenMul && enemy.damageTakenMul !== 1) {
+          dmg = Math.max(1, Math.floor(dmg * enemy.damageTakenMul));
+        }
+        // 沙漠专属：热寂（敌人越快越吃伤）+ 旱魃之息（沙暴期全伤害加成）+ 风蚀（叠层易伤）
+        const desertMul = desertDamageMul() * erosionMul(enemy) * mapDamageMul();
+        if (desertMul !== 1) dmg = Math.max(1, Math.floor(dmg * desertMul));
+        applyErosionStack(enemy);   // 本次命中后再叠层，所以第一发不吃自己的加成
         if (state.devOneHitKill && !voidCoreLocked && !enemy.inCutscene) {
           dmg = Math.max(dmg, Math.max(enemy.hp, 1));
         }
@@ -2466,7 +2925,7 @@ function createBattleScene(options) {
               if (state.endlessMode) {
                 performEndlessRoundResetToWave1(true);
               } else {
-                state.offerEndlessAfterVoidWin = isVoidLineBoss(enemy);
+                state.offerEndlessAfterVoidWin = resolveBossVictory(enemy);
                 state.win = true;
                 state.gameOver = true;
                 if (!state.offerEndlessAfterVoidWin) finishRun();
@@ -2515,7 +2974,8 @@ function createBattleScene(options) {
         if (enemy.isBoss && enemy.inCutscene) continue;
         const voidCoreLocked = enemy.isVoidCore && state.elapsed < (state.voidCoreUnlockAt || 0);
         if (voidCoreLocked) continue;
-        let dmg = overlapCount * state.satelliteDamagePerSec * (dt / 1000);
+        let dmg = overlapCount * state.satelliteDamagePerSec * (dt / 1000) * mapDamageMul();
+        if (enemy.damageTakenMul && enemy.damageTakenMul !== 1) dmg *= enemy.damageTakenMul;
         if (enemy.isBoss) dmg *= state.bossDmgMul;
         else if (enemy.isElite) dmg *= state.eliteDmgMul;
         if (state.devOneHitKill && !enemy.inCutscene) {
@@ -2553,7 +3013,7 @@ function createBattleScene(options) {
             if (state.endlessMode) {
               performEndlessRoundResetToWave1(true);
             } else {
-              state.offerEndlessAfterVoidWin = isVoidLineBoss(enemy);
+              state.offerEndlessAfterVoidWin = resolveBossVictory(enemy);
               state.win = true;
               state.gameOver = true;
               if (!state.offerEndlessAfterVoidWin) finishRun();
@@ -2609,11 +3069,20 @@ function createBattleScene(options) {
       // 无伤弹（仅占位/演出）不参与扣护盾与生命
       if (incomingBulletDmg <= 0) continue;
 
-      // 护盾优先抵挡（护盾承受双倍伤害）
+      // 护盾优先抵挡（护盾承受双倍伤害）；护盾不足以吃下整发时，剩余伤害穿透到生命值，
+      // 避免“只要护盾还剩 1 点就能完全免疫一发”导致护盾回复百分比几乎不影响强度
       if (state.shieldHp > 0) {
-        state.shieldHp = Math.max(0, state.shieldHp - incomingBulletDmg * Math.max(1, state.shieldDamageMul || 1));
+        const shieldMul = Math.max(1, state.shieldDamageMul || 1);
+        const shieldCost = incomingBulletDmg * shieldMul;
         state.shieldFlashMs = 240;
-        continue;
+        if (state.shieldHp >= shieldCost) {
+          state.shieldHp -= shieldCost;
+          continue;
+        }
+        // 残余护盾按承伤倍率折算成能挡下的伤害量，其余穿透
+        incomingBulletDmg = Math.max(0, incomingBulletDmg - state.shieldHp / shieldMul);
+        state.shieldHp = 0;
+        if (incomingBulletDmg <= 0) continue;
       }
       state.hp -= incomingBulletDmg;
       if (state.hp <= 0) {
@@ -2631,6 +3100,7 @@ function createBattleScene(options) {
         state.enemies.splice(i, 1);
         continue;
       }
+      if (enemy.untargetable) continue;   // 掘地者潜沙期：不参与撞机
       if (!rectHit(enemy, p)) continue;
       if (enemy.isBoss && enemy.inCutscene) continue;
       if (enemy.isVoidCore && state.elapsed < (state.voidCoreUnlockAt || 0)) continue;
@@ -2644,8 +3114,9 @@ function createBattleScene(options) {
       }
 
       // 反伤：按“实际受到的撞击伤害”比例反弹（不击杀 Boss 但能扣血）
-      if (state.thornReflectRate > 0) {
-        let reflect = Math.max(1, Math.round(incomingContactDmg * state.thornReflectRate));
+      // 无敌道具生效期间不结算反伤——否则吃一个 INV 贴脸 Boss 就是每帧零代价输出
+      if (state.thornReflectRate > 0 && state.invincibleMs <= 0) {
+        let reflect = Math.max(1, Math.round(incomingContactDmg * state.thornReflectRate * mapDamageMul()));
         if (
           state.devOneHitKill
           && !(enemy.isVoidCore && state.elapsed < (state.voidCoreUnlockAt || 0))
@@ -2675,7 +3146,7 @@ function createBattleScene(options) {
           if (state.endlessMode) {
             performEndlessRoundResetToWave1(true);
           } else {
-            state.offerEndlessAfterVoidWin = isVoidLineBoss(enemy);
+            state.offerEndlessAfterVoidWin = resolveBossVictory(enemy);
             state.win = true;
             state.gameOver = true;
             if (!state.offerEndlessAfterVoidWin) finishRun();
@@ -2694,15 +3165,22 @@ function createBattleScene(options) {
       // 暂时无敌：穿过敌机不扣血（普通敌机不消失，避免一闪过去清空）；DEV 无敌同理
       if (state.invincibleMs > 0 || state.godMode) continue;
 
-      // 护盾抵挡撞击（护盾承受双倍伤害）
+      // 护盾抵挡撞击（护盾承受双倍伤害）；护盾不足以吃下整次撞击时，剩余伤害穿透到生命值
       if (state.shieldHp > 0) {
-        state.shieldHp = Math.max(
-          0,
-          state.shieldHp - incomingContactDmg * Math.max(1, state.shieldDamageMul || 1),
-        );
+        const shieldMul = Math.max(1, state.shieldDamageMul || 1);
+        const shieldCost = incomingContactDmg * shieldMul;
         state.shieldFlashMs = 240;
-        if (!enemy.isBoss) state.enemies.splice(i, 1);
-        continue;
+        if (state.shieldHp >= shieldCost) {
+          state.shieldHp -= shieldCost;
+          if (!enemy.isBoss) state.enemies.splice(i, 1);
+          continue;
+        }
+        incomingContactDmg = Math.max(0, incomingContactDmg - state.shieldHp / shieldMul);
+        state.shieldHp = 0;
+        if (incomingContactDmg <= 0) {
+          if (!enemy.isBoss) state.enemies.splice(i, 1);
+          continue;
+        }
       }
 
       if (!enemy.isBoss) state.enemies.splice(i, 1);
@@ -2732,28 +3210,277 @@ function createBattleScene(options) {
   // ==========================================================================
 
   /** 背景：纯色 + 70 个滚动小星点 */
+  /** 主题里的某个可选颜色字段：两档之间插值；任一档没写就退回 fallback */
+  function lerpThemeColor(key, fallback) {
+    const a = state.themeFrom[key];
+    const b = state.themeTo[key];
+    if (!a && !b) return fallback;
+    return lerpHex(a || b, b || a, state.themeBlendT);
+  }
+
+  /**
+   * 俯视沙海：游戏是自上而下的俯视角，所以**不画地平线也不画侧视沙丘剪影**。
+   * 地面质感只有一层：随时间向下漂移的风成沙纹，做出"机体在沙海上飞行"的感觉。
+   */
+  function drawSandSea(ctx, rippleColor) {
+    const t = state.elapsed;
+
+    // ---- 风成沙纹（细、稍快，是质感不是花纹，所以压低透明度）----
+    const STEP = 26;
+    const drift = (t * 0.03) % STEP;
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = rippleColor;
+    ctx.lineWidth = 1.5;
+    for (let k = -1; k * STEP < H + STEP; k += 1) {
+      const baseY = k * STEP + drift;
+      const phase = k * 0.9;
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 22) {
+        const y = baseY
+          + Math.sin(x * 0.013 + phase) * 5
+          + Math.sin(x * 0.031 + phase * 1.7) * 2.2;
+        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   function drawBackground(ctx) {
+    if (state.mapParticle === "grassland") { drawGrasslandBackground(ctx, state, W, H); return; }
+    if (state.mapParticle === "ocean") {
+      drawOceanBackground(ctx, state, W, H);
+      return;
+    }
     const bg = lerpHex(state.themeFrom.bg, state.themeTo.bg, state.themeBlendT);
     const star = lerpHex(state.themeFrom.star, state.themeTo.star, state.themeBlendT);
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
+
+    // 俯视沙海的地面质感画在颗粒之下（颗粒是被风吹起、掠过镜头的沙，应该压在最上层）
+    if (state.mapSandSea) drawSandSea(ctx, lerpThemeColor("ripple", star));
+
     ctx.fillStyle = star;
-    for (let i = 0; i < 70; i += 1) {
-      const x = (i * 37 + state.elapsed * 0.02) % W;
-      const y = (i * 67 + state.elapsed * 0.1) % H;
-      ctx.fillRect(x, y, 2, 2);
+    if (state.mapParticle === "sand") {
+      // 沙漠：横向吹拂的沙粒，粗细与速度分三档，做出"风里的尘"的层次
+      for (let i = 0; i < 70; i += 1) {
+        const lane = i % 3;
+        const spd = 0.11 + lane * 0.07;
+        const x = (i * 37 + state.elapsed * spd) % W;
+        const y = (i * 67 + state.elapsed * 0.02) % H;
+        ctx.fillRect(x, y, 2 + lane, 1);
+      }
+    } else {
+      // 星空：纵向下坠的星点
+      for (let i = 0; i < 70; i += 1) {
+        const x = (i * 37 + state.elapsed * 0.02) % W;
+        const y = (i * 67 + state.elapsed * 0.1) % H;
+        ctx.fillRect(x, y, 2, 2);
+      }
     }
+
     if (state.voidDarknessAlpha > 0) {
-      const p = state.player;
-      const cx = p.x + p.w / 2;
-      const cy = p.y + p.h / 2;
+      drawVisionVeil(ctx, "0, 0, 0", Math.min(0.9, state.voidDarknessAlpha), 92);
+    }
+  }
+
+  /**
+   * 视野受限幕：整屏铺一层色幕，再用 destination-out 在玩家周围挖一个带羽化的洞。
+   * 虚空 Boss 与沙暴共用，只是颜色和半径不同。
+   * @param {string} rgb    "r, g, b" 三元组
+   * @param {number} alpha  幕的浓度
+   * @param {number} radius 可视半径（px）
+   */
+  function drawVisionVeil(ctx, rgb, alpha, radius) {
+    const a = Math.max(0, Math.min(1, alpha));
+    if (a <= 0 || radius <= 0) return;
+    const pl = state.player;
+    const cx = pl.x + pl.w / 2;
+    const cy = pl.y + pl.h / 2;
+    ctx.save();
+    ctx.fillStyle = `rgba(${rgb}, ${a})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "destination-out";
+    // 中心全透明 → 边缘不挖，形成羽化的可视圈
+    const g = ctx.createRadialGradient(cx, cy, radius * 0.55, cx, cy, radius);
+    g.addColorStop(0, "rgba(0,0,0,1)");
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /**
+   * 沙暴期"看不清"的强度 0~1（随沙幕浓度缓入缓出）。
+   * 视野受限不再用整块暗幕挖洞——那样又糙又挡视线；改为按距离降低**敌人**的透明度，
+   * 远处的敌人在风沙里淡到几乎看不见，近处照常。敌弹始终全不透明，否则不公平。
+   */
+  function sandstormFogT() {
+    const cfg = state.sandstormCfg;
+    if (!cfg || !cfg.maxAlpha) return 0;
+    return Math.max(0, Math.min(1, state.sandstormAlpha / cfg.maxAlpha));
+  }
+
+  /** 单个敌人在风沙里的透明度：近处 1，远处衰减到 SANDSTORM_MIN_ENEMY_ALPHA */
+  function sandstormEnemyAlpha(enemy) {
+    if (state.stormClearSight) return 1;   // 沙镜 / 沙暴之眼
+    const t = sandstormFogT();
+    if (t <= 0) return 1;
+    const cfg = state.sandstormCfg;
+    const near = cfg.visionR || 150;
+    const far = near * 2.6;
+    const pl = state.player;
+    const dx = (enemy.x + enemy.w / 2) - (pl.x + pl.w / 2);
+    const dy = (enemy.y + enemy.h / 2) - (pl.y + pl.h / 2);
+    const d = Math.hypot(dx, dy);
+    const k = Math.max(0, Math.min(1, (d - near) / Math.max(1, far - near)));
+    return 1 - k * (1 - SANDSTORM_MIN_ENEMY_ALPHA) * t;
+  }
+
+  /** 旱魃过热破绽：Boss 周围一圈脉动光环，明确告诉玩家"现在可以打" */
+  function drawBossOverheat(ctx) {
+    for (let i = 0; i < state.enemies.length; i += 1) {
+      const e = state.enemies[i];
+      if (!e || !e.isBoss || !e.hanbaOverheat) continue;
+      const cx = e.x + e.w / 2;
+      const cy = e.y + e.h / 2;
+      const pulse = 0.5 + 0.5 * Math.sin(state.elapsed * 0.02);
+      const r = Math.max(e.w, e.h) * (0.66 + pulse * 0.16);
       ctx.save();
-      ctx.fillStyle = `rgba(0, 0, 0, ${Math.max(0, Math.min(0.9, state.voidDarknessAlpha))})`;
-      ctx.fillRect(0, 0, W, H);
-      ctx.globalCompositeOperation = "destination-out";
+      ctx.globalAlpha = 0.28 + pulse * 0.34;
+      ctx.strokeStyle = "#fbbf24";
+      ctx.lineWidth = 3 + pulse * 3;
       ctx.beginPath();
-      ctx.arc(cx, cy, 92, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.18 + pulse * 0.2;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 1.28, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  /**
+   * 旱魃的场地招式预警（画在敌人之下，避免盖住弹幕）：
+   * 流沙区 / 裂地矛升起位置 / 尘暴冲撞路径 / 旋沙中心。
+   */
+  function drawHanbaTelegraphs(ctx) {
+    const pulse = 0.55 + 0.45 * Math.sin(state.elapsed * 0.014);
+
+    // 流沙区：预警期虚线圈，生效期实心暗斑
+    const warn = state.quicksandWarnZones;
+    const live = state.quicksandZones;
+    if (warn) {
+      ctx.save();
+      ctx.globalAlpha = 0.35 + pulse * 0.35;
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth = 2;
+      warn.forEach((z) => {
+        ctx.beginPath();
+        ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+    if (live) {
+      ctx.save();
+      ctx.globalAlpha = 0.32;
+      ctx.fillStyle = "#3b2a10";
+      live.forEach((z) => {
+        ctx.beginPath();
+        ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = "#a16207";
+      ctx.lineWidth = 2;
+      live.forEach((z) => {
+        ctx.beginPath();
+        ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+
+    // 裂地矛：屏幕下缘将要升起的位置
+    const sp = state.hanbaSpikeWarn;
+    if (sp) {
+      const step = W / (sp.n - 1);
+      ctx.save();
+      ctx.globalAlpha = 0.3 + pulse * 0.45;
+      ctx.fillStyle = "#f59e0b";
+      for (let i = 0; i < sp.n; i += 1) {
+        if (i === sp.gap) continue;
+        ctx.fillRect(i * step - 6, H - 6, 12, 6);
+      }
+      ctx.restore();
+    }
+
+    // 尘暴冲撞：路径线
+    const dw = state.hanbaDashWarn;
+    if (dw) {
+      ctx.save();
+      ctx.globalAlpha = 0.35 + pulse * 0.4;
+      ctx.strokeStyle = "#fb923c";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(dw.from.x, dw.from.y);
+      ctx.lineTo(dw.to.x, dw.to.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 旋沙：中心向内的吸引提示
+    const vx = state.hanbaVortexAt;
+    if (vx) {
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      ctx.strokeStyle = "#fbbf24";
+      ctx.lineWidth = 2;
+      for (let r = 1; r <= 3; r += 1) {
+        const rad = 40 * r - ((state.elapsed * 0.06) % 40);
+        if (rad <= 4) continue;
+        ctx.beginPath();
+        ctx.arc(vx.x, vx.y, rad, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  /** 沙暴：极淡的暖色尘雾 + 预警期的边缘泛黄脉动（画在敌人与玩家之上、HUD 之下） */
+  function drawSandstormVeil(ctx) {
+    const cfg = state.sandstormCfg;
+    if (!cfg) return;
+    const t = sandstormFogT();
+    if (t > 0) {
+      // 只是一层很淡的尘雾，交代"空气里有沙"，不承担遮挡功能
+      ctx.save();
+      ctx.fillStyle = `rgba(${cfg.veilRgb || "120, 82, 28"}, ${(0.16 * t).toFixed(3)})`;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
+    const pulse = state.sandstormWarnPulse || 0;
+    if (pulse > 0) {
+      // 预警：四边内收的黄色辉光，提示玩家调整站位
+      const band = 46;
+      ctx.save();
+      ctx.globalAlpha = 0.18 + pulse * 0.3;
+      const mk = (x0, y0, x1, y1) => {
+        const g = ctx.createLinearGradient(x0, y0, x1, y1);
+        g.addColorStop(0, "rgba(245, 158, 11, 1)");
+        g.addColorStop(1, "rgba(245, 158, 11, 0)");
+        return g;
+      };
+      ctx.fillStyle = mk(0, 0, 0, band);       ctx.fillRect(0, 0, W, band);
+      ctx.fillStyle = mk(0, H, 0, H - band);   ctx.fillRect(0, H - band, W, band);
+      ctx.fillStyle = mk(0, 0, band, 0);       ctx.fillRect(0, 0, band, H);
+      ctx.fillStyle = mk(W, 0, W - band, 0);   ctx.fillRect(W - band, 0, band, H);
       ctx.restore();
     }
   }
@@ -2840,7 +3567,7 @@ function createBattleScene(options) {
     }
   }
 
-  /** 玩家飞机：三角形，宽 24 高 30 */
+  /** 玩家机体与无敌反馈，贴图关闭时使用代码外观。 */
   function drawPlayer(ctx) {
     const p = state.player;
 
@@ -2855,21 +3582,12 @@ function createBattleScene(options) {
       ctx.fill();
     }
 
-    if (state.characterId === "striker" && battleTexturesEnabled() && strikerPlayerImg && strikerPlayerImgReady) {
-      // 仅视觉放大，碰撞盒仍为 p.w × p.h；想改大小改 STRIKER_TEX_SCALE
-      const STRIKER_TEX_SCALE = 2.8;
-      const drawW = p.w * STRIKER_TEX_SCALE;
-      const drawH = p.h * STRIKER_TEX_SCALE;
-      const cx = p.x + p.w / 2;
-      const cy = p.y + p.h / 2;
-      ctx.drawImage(strikerPlayerImg, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
-    } else if (state.characterId === "taffy" && taffyPlayerImg && taffyPlayerImgReady) {
-      const TAFFY_TEX_SCALE = 2.35;
-      const drawW = p.w * TAFFY_TEX_SCALE;
-      const drawH = p.h * TAFFY_TEX_SCALE;
-      const cx = p.x + p.w / 2;
-      const cy = p.y + p.h / 2;
-      ctx.drawImage(taffyPlayerImg, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
+    if (drawCharacterTexture(ctx, state.characterId, p.x, p.y, p.w, p.h, battleTexturesEnabled(), "battle")) {
+      // 绘制范围只影响外观，沿用原有碰撞盒。
+    } else if (state.characterId === "windrunner") {
+      drawWindrunnerShape(ctx, p.x - p.w * 0.3, p.y - p.h * 0.3, p.w * 1.6, p.h * 1.6, state);
+    } else if (state.characterId === "tidecaller") {
+      drawTidecallerShape(ctx, p.x - p.w * 0.3, p.y - p.h * 0.3, p.w * 1.6, p.h * 1.6, state);
     } else if (state.characterId === "prism") {
       const stripes = ["#ef4444", "#f59e0b", "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#a855f7"];
       ctx.save();
@@ -2905,17 +3623,30 @@ function createBattleScene(options) {
     }
   }
 
-  /** 敌机：普通三角形 / 精英四边形 / Boss 五边形 + 顶部血条；Boss 加锁定预警线 */
+  /** 地图专属生物外观与星空机体，共用血条、碰撞状态及战斗预警。 */
   function drawEnemies(ctx) {
     // 精英贴图仅视觉缩放（碰撞盒见 enemies.js createElite 的 w/h）；想调大小改此值
     const ELITE_TEX_SCALE = 3.5;
     state.enemies.forEach((enemy) => {
       if (!enemy || typeof enemy.x !== "number") return;
+      // 沙暴：远处敌人在风沙里淡下去（Boss 不参与，否则打 Boss 会变成猜位置）
+      const fogAlpha = enemy.isBoss ? 1 : sandstormEnemyAlpha(enemy);
+      const foggy = fogAlpha < 1;
+      if (foggy) {
+        ctx.save();
+        ctx.globalAlpha = fogAlpha;
+      }
       ctx.fillStyle = enemy.color;
       const cx = enemy.x + enemy.w / 2;
       const cy = enemy.y + enemy.h / 2;
 
-      if (enemy.isBoss) {
+      const grassDrawn = drawGrasslandTexture(ctx, enemy, state, battleTexturesEnabled()) || drawGrasslandEnemy(ctx, enemy, state);
+      const desertDrawn = !grassDrawn && drawDesertEnemyVisual(ctx, enemy, state, battleTexturesEnabled());
+      const textureDrawn = !grassDrawn && !desertDrawn && drawEnemyTexture(ctx, enemy, state, battleTexturesEnabled());
+      const oceanDrawn = !grassDrawn && !desertDrawn && !textureDrawn && drawOceanEnemy(ctx, enemy, state);
+      if (grassDrawn || desertDrawn || textureDrawn || oceanDrawn) {
+        // 专属轮廓已绘制，继续使用下方共用血条。
+      } else if (enemy.isBoss) {
         if (enemy.isVoidCore) {
           const scl = Math.max(
             0.2,
@@ -3050,42 +3781,20 @@ function createBattleScene(options) {
         ctx.fill();
         ctx.restore();
       } else if (enemy.isElite) {
-        if (battleTexturesEnabled() && eliteEnemyImg && eliteEnemyImgReady) {
-          const drawW = enemy.w * ELITE_TEX_SCALE;
-          const drawH = enemy.h * ELITE_TEX_SCALE;
-          ctx.drawImage(eliteEnemyImg, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
-        } else {
-          // 精英：四边形（菱形）
-          ctx.beginPath();
-          ctx.moveTo(cx, enemy.y);
-          ctx.lineTo(enemy.x + enemy.w, cy);
-          ctx.lineTo(cx, enemy.y + enemy.h);
-          ctx.lineTo(enemy.x, cy);
-          ctx.closePath();
-          ctx.fill();
-        }
+        ctx.beginPath();
+        ctx.moveTo(cx, enemy.y);
+        ctx.lineTo(enemy.x + enemy.w, cy);
+        ctx.lineTo(cx, enemy.y + enemy.h);
+        ctx.lineTo(enemy.x, cy);
+        ctx.closePath();
+        ctx.fill();
       } else {
-        // 普通：倒三角（尖朝下）
-        if (enemy.type === "grunt" && battleTexturesEnabled() && normalEnemyImg && normalEnemyImgReady) {
-          // 普通敌人贴图显示缩放倍数（仅视觉大小，不影响碰撞体积）
-          // 想调大小就改这里：2 = 两倍，3 = 三倍，4 = 四倍
-          const drawW = enemy.w * 3;
-          const drawH = enemy.h * 3;
-          ctx.drawImage(
-            normalEnemyImg,
-            cx - drawW / 2,
-            cy - drawH / 2,
-            drawW,
-            drawH
-          );
-        } else {
-          ctx.beginPath();
-          ctx.moveTo(enemy.x, enemy.y);
-          ctx.lineTo(enemy.x + enemy.w, enemy.y);
-          ctx.lineTo(cx, enemy.y + enemy.h);
-          ctx.closePath();
-          ctx.fill();
-        }
+        ctx.beginPath();
+        ctx.moveTo(enemy.x, enemy.y);
+        ctx.lineTo(enemy.x + enemy.w, enemy.y);
+        ctx.lineTo(cx, enemy.y + enemy.h);
+        ctx.closePath();
+        ctx.fill();
       }
 
       // 血条
@@ -3108,7 +3817,7 @@ function createBattleScene(options) {
         const bx = enemy.x;
         const bw = enemy.w;
         const barH = 6;
-        const yBar = enemy.y - 10;
+        const yBar = enemy.y - (grassDrawn || desertDrawn || textureDrawn ? 24 : 10);
         ctx.fillStyle = "rgba(2, 6, 23, 0.94)";
         ctx.fillRect(bx - 1, yBar - 1, bw + 2, barH + 2);
         ctx.strokeStyle = "rgba(148,163,184,0.5)";
@@ -3135,10 +3844,10 @@ function createBattleScene(options) {
         // 想往下挪：改成 enemy.y - enemy.h + N（N 越大越靠下）
         // 想往上挪：改成 enemy.y - enemy.h - N（N 越大越靠上）
         // 精英血条：对齐「贴图视觉顶部」略上一点（勿再用 enemy.h*scale 顶到屏外）
-        let hpBarY = enemy.y;
-        if (enemy.type === "grunt" && battleTexturesEnabled() && normalEnemyImg && normalEnemyImgReady) {
+        let hpBarY = grassDrawn || desertDrawn || textureDrawn ? enemy.y - Math.max(5, enemy.h * 0.12 + 3) : enemy.y;
+        if (textureDrawn && enemy.type === "grunt") {
           hpBarY = enemy.y - enemy.h + 20;
-        } else if (enemy.isElite && battleTexturesEnabled() && eliteEnemyImg && eliteEnemyImgReady) {
+        } else if (textureDrawn && enemy.type === "elite") {
           const eliteVisTop = cy - (enemy.h * ELITE_TEX_SCALE) / 2;
           hpBarY = eliteVisTop + 60;
         }
@@ -3149,6 +3858,7 @@ function createBattleScene(options) {
         ctx.fillRect(enemy.x, hpBarY, enemy.w * ratio, 3);
       }
       ctx.restore();
+      if (foggy) ctx.restore();
     });
   }
 
@@ -3156,6 +3866,7 @@ function createBattleScene(options) {
   function drawBullets(ctx) {
     // 轨道卫星
     if (state.satelliteCount > 0) {
+      ensureSatelliteTextures();
       const p = state.player;
       const cx = p.x + p.w / 2;
       const cy = p.y + p.h / 2;
@@ -3186,10 +3897,52 @@ function createBattleScene(options) {
     state.bullets.forEach((b) => {
       if (!b || typeof b.x !== "number") return;
       ctx.fillStyle = b.color || "#facc15";
-      ctx.fillRect(b.x, b.y, b.w, b.h);
+      if (b.tidecallerBolt) {
+        ctx.beginPath();
+        ctx.ellipse(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else ctx.fillRect(b.x, b.y, b.w, b.h);
     });
     state.enemyBullets.forEach((b) => {
       if (!b || typeof b.x !== "number") return;
+      if (b.grassBall) {
+        ctx.save();
+        ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
+        ctx.rotate(b.grassBallAngle || 0);
+        ctx.fillStyle = "#65753b";
+        ctx.strokeStyle = "#d6c674";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(0, 0, b.w * 0.46, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        for (let i = 0; i < 6; i += 1) {
+          ctx.rotate(Math.PI / 3);
+          ctx.beginPath(); ctx.moveTo(-b.w * 0.32, 2); ctx.quadraticCurveTo(0, -b.h * 0.38, b.w * 0.3, 3); ctx.stroke();
+        }
+        ctx.restore();
+        return;
+      }
+      if (b.grassFeather) {
+        ctx.save();
+        ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
+        ctx.rotate(Math.atan2(b.vy, b.vx) - Math.PI / 2);
+        ctx.fillStyle = "#edc48a";
+        ctx.beginPath(); ctx.moveTo(0, -b.h / 2); ctx.quadraticCurveTo(b.w, 0, 0, b.h / 2); ctx.quadraticCurveTo(-b.w, 0, 0, -b.h / 2); ctx.fill();
+        ctx.restore();
+        return;
+      }
+      if (b.oceanBullet || b.grassBullet) {
+        // 实际命中框内绘制实心珠状弹；深色描边保证浪纹上仍可辨认。
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = b.color || "#ffad91";
+        ctx.strokeStyle = "#3b2036";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+        return;
+      }
       const petaling = Boolean(b.judgementBolt && state.finalJudgementPetalMs > 0);
       if (petaling) {
         ctx.save();
@@ -3264,6 +4017,19 @@ function createBattleScene(options) {
       20,
       18 + UI_SHIFT_Y,
     );
+
+    // 进化池抽空后的"自动补给"提示（不弹面板，所以要给一行反馈）
+    if ((state.autoRewardToastMs || 0) > 0) {
+      const a = Math.max(0, Math.min(1, state.autoRewardToastMs / 600));
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.fillStyle = "#fbbf24";
+      ctx.font = "bold 13px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(`补给空投  生命全满  +${AUTO_LEVEL_REWARD_COINS} 金币`, 20, 112 + UI_SHIFT_Y);
+      ctx.restore();
+    }
 
     // 真实经验条：state.exp / state.expToNext
     const expProgress = Math.max(0, Math.min(1, state.exp / Math.max(1, state.expToNext)));
@@ -3550,6 +4316,20 @@ function createBattleScene(options) {
     ctx.fillStyle = "#fbbf24";
     ctx.fillText(`本局获得金币 +${state.coinsEarned}`, W / 2, H / 2 - 4 + UI_SHIFT_Y);
 
+    // 新地图解锁提示（击败隐藏 Boss 后解锁「沙漠」）
+    if (state.newMapUnlockedName) {
+      ctx.fillStyle = "#f59e0b";
+      ctx.font = "bold 15px sans-serif";
+      ctx.fillText(`已解锁新地图：${state.newMapUnlockedName}`, W / 2, H / 2 + 22 + UI_SHIFT_Y);
+      ctx.font = "16px sans-serif";
+    }
+
+    if (state.newCharacterUnlockedName) {
+      ctx.fillStyle = "#bce9cc";
+      ctx.font = "bold 15px sans-serif";
+      ctx.fillText(`已解锁新角色：${state.newCharacterUnlockedName}`, W / 2, H / 2 + 44 + UI_SHIFT_Y);
+    }
+
     // "再来一局"主按钮（getRestartRect）
     const re = getRestartRect();
     ctx.fillStyle = "#1d4ed8";
@@ -3614,15 +4394,21 @@ function createBattleScene(options) {
   /** 总绘制入口（按 z-order 串起来） */
   function draw(ctx) {
     drawBackground(ctx);
+    if (state.mapParticle === "ocean") drawOceanOverlay(ctx, state, W, H);
+    if (state.mapParticle === "grassland") drawGrasslandOverlay(ctx, state, W, H);
+    drawHanbaTelegraphs(ctx);
     drawItems(ctx);
     drawBullets(ctx);
     drawPlayer(ctx);
     drawEnemies(ctx);
+    drawBossOverheat(ctx);
     drawVoidPhase2Cutscene(ctx);
     drawVoidTelegraphs(ctx);
+    drawSandstormVeil(ctx);   // 沙幕压在敌人/玩家之上、HUD 之下
     drawBombFlash(ctx);
     drawHiddenVoidIntroStrobe(ctx);
     drawHud(ctx);
+    drawWindCharge(ctx, state, W, H);
     if (state.pausedForUpgrade) drawUpgradePanel(ctx);
     if (state.gameOver) drawGameOver(ctx);
   }
@@ -3706,10 +4492,18 @@ function createBattleScene(options) {
     if (!state.touchActive || state.pausedForUpgrade || state.gameOver) return;
     let nx = t.x - state.touchOffsetX;
     let ny = t.y - state.touchOffsetY;
+    // 流沙：踩在旱魃标记的区域里时，本次拖动只走一部分（手感上像被拖住）
+    const mul = quicksandMoveMul() * grassPlayerMoveMul(state, state.player.x, state.player.y, Math.max(0, Math.min(W - state.player.w, nx)), Math.max(0, Math.min(H - state.player.h, ny)));
+    if (mul < 1) {
+      nx = state.player.x + (nx - state.player.x) * mul;
+      ny = state.player.y + (ny - state.player.y) * mul;
+    }
     nx = Math.max(0, Math.min(W - state.player.w, nx));
     ny = Math.max(0, Math.min(H - state.player.h, ny));
+    const fromX = state.player.x, fromY = state.player.y;
     state.player.x = nx;
     state.player.y = ny;
+    chargeWindrunner(state, fromX, fromY);
   }
 
   function onTouchEnd() {
@@ -3734,8 +4528,3 @@ function createBattleScene(options) {
 }
 
 module.exports = { createBattleScene };
-
-
-
-
-

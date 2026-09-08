@@ -27,7 +27,9 @@ const ITEM_TYPES = {
   magnet: { color: "#60a5fa", label: "MAG", weight: 1 },
   coin:   { color: "#fbbf24", label: "$$",  weight: 4 },
 
-  // 仅 Boss 战随机掉落（weight=0 → 普通敌机不会掉），需 createItem(x,y,type) 强制生成
+  // weight=0 → 不进普通随机池，只能由 createItem(x,y,type) 强制生成
+  // levelup(LV+)：仅「空投信标」词条生效后定期空投，或「战术学习III」按概率从尸体掉落；不再默认出现在 Boss 战
+  // invincible(INV)：Boss 战周期掉落
   levelup:    { color: "#c4b5fd", label: "LV+", weight: 0 },
   invincible: { color: "#fde047", label: "INV", weight: 0 },
 };

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>海洋 · 归墟远征</title>
+<style>
+  *{box-sizing:border-box}body{--accent:#5eead4;--border:#2c5363;--muted:#adcbce;margin:0;background:#050f1b;color:#edf9f9;font:14px system-ui,sans-serif;min-height:100svh}body[data-map=desert]{--accent:#f6bd72;--border:#76604b;--muted:#cfbca5;background:#171310}
+  main{display:flex;min-height:100svh;align-items:center;justify-content:center;gap:48px;padding:24px}
+  aside{width:290px}h1{font-size:38px;font-weight:650;margin:0 0 16px;letter-spacing:.02em}p{color:var(--muted);line-height:1.8;margin:0 0 24px;white-space:pre-line}
+  nav{display:flex;flex-direction:column;gap:10px}button{font:inherit;text-align:left;cursor:pointer;padding:12px 16px;border:1px solid var(--border);border-radius:8px;background:transparent;color:#e9e5dd}
+  button:hover,button:focus-visible{border-color:var(--accent);outline:2px solid var(--accent);outline-offset:2px}button[aria-pressed=true]{background:var(--accent);color:#241c17;border-color:var(--accent)}
+  .map-select{flex-direction:row;margin-bottom:8px}.map-select button{flex:1;text-align:center}.preview-note{font-size:12px;margin-bottom:18px;color:var(--muted)}#textures{width:100%;margin-top:16px}.toggle-hint{font-size:12px;margin:6px 0 0}
+  small{display:block;color:var(--muted);line-height:1.8;margin-top:20px;white-space:pre-line}canvas{display:block;width:min(390px,calc((100svh - 48px)*390/844));height:auto;max-width:100%;border:1px solid var(--border);touch-action:none;background:#063b4b}
+  #error{color:#ffb0a3;max-width:70ch;white-space:pre-wrap}
+  body[data-map=grassland]{--accent:#c7df7b;--border:#607952;--muted:#bfcca9;background:#121d16}body[data-map=starfield]{--accent:#a8bffa;--border:#465b88;--muted:#b7c1df}
+  #preview-notice{color:#f0d4a1;font-size:12px;line-height:1.6;margin-top:8px}#preview-notice:empty{display:none}.map-select button{padding:10px 7px}button[aria-disabled=true]{color:#9baca5;border-style:dashed}
+  @media(max-width:720px){main{display:block;padding:12px}aside{width:auto;max-width:440px;margin:auto}h1{font-size:24px;margin-bottom:4px}p{margin-bottom:10px;font-size:12px}nav{flex-direction:row;gap:6px;flex-wrap:wrap}button{padding:8px;font-size:12px}.map-select{margin:10px 0 6px}.preview-note{margin-bottom:10px}#textures{width:auto;margin-top:10px}.toggle-hint{display:inline;margin-left:6px}small{margin:8px 0;font-size:11px}canvas{width:min(390px,100%);margin:16px auto}}
+  @media(max-width:720px){main{display:flex;flex-direction:column;gap:8px;padding:8px;justify-content:flex-start}aside{width:100%;margin:0 auto}h1{font-size:20px;margin:0}#map-description,.preview-note,.toggle-hint,small{display:none}.map-select{margin:5px 0}button{padding:7px 9px}#textures{margin-top:5px}#error:empty{display:none}canvas{width:min(390px,calc((100svh - var(--preview-controls-height,222px))*390/844));margin:0 auto}}
+</style>
+<main>
+  <aside>
+    <h1 id="map-title">海洋 · 归墟远征</h1>
+    <p id="map-description">从珊瑚浅海驶入无光海沟。<br>追随潮汐，迎战归墟之主。</p>
+    <nav class="map-select" aria-label="选择地图">
+      <button data-map="ocean" aria-pressed="true">海洋</button>
+      <button data-map="desert" aria-pressed="false">沙漠</button>
+      <button data-map="starfield" aria-pressed="false">星空</button>
+      <button data-map="grassland" aria-pressed="false" aria-disabled="true">草原 · 通关海洋解锁</button>
+    </nav>
+    <div class="preview-note">试玩已开放沙漠</div>
+    <nav aria-label="试玩模式">
+      <button data-mode="play" aria-pressed="true">进入海洋</button>
+      <button data-mode="boss" aria-pressed="false">Boss 练习</button>
+      <button data-mode="gallery" aria-pressed="false">海洋生物图鉴</button>
+      <button data-mode="hangar" aria-pressed="false">战机图鉴</button>
+      <button data-mode="menu" aria-pressed="false">原版菜单</button>
+    </nav>
+    <button id="textures" aria-pressed="false">战斗贴图：关闭</button>
+    <p class="toggle-hint" id="texture-hint">点击切换贴图与代码绘制的生物造型</p>
+    <div id="preview-notice" role="status" aria-live="polite"></div>
+    <small id="map-tips">鼠标或手指拖动机体 · 自动开火
+涨潮横推机体，拾取经验 +20%
+Boss 练习提供 12 级构筑；图鉴放大展示造型。</small>
+    <pre id="error" role="alert"></pre>
+  </aside>
+  <canvas id="game" width="390" height="844" aria-label="海洋肉鸽射击游戏"></canvas>
+</main>
+<script>window.__consoleErrors=[];window.addEventListener('error',e=>{window.__consoleErrors.push(String(e.message));document.getElementById('error').textContent=e.message;});</script>
+<script src="/preview.js" onerror="const message='预览脚本加载失败，请检查本地服务后刷新。';window.__consoleErrors.push(message);document.getElementById('error').textContent=message;"></script>
+</html>

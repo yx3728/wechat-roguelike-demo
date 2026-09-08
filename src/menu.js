@@ -1,7 +1,11 @@
 /**
  * menu.js
  * ----------------------------------------------------------------------------
- * 主菜单场景：标题 / 金币 / 角色选择 / 天赋升级 / 开始游戏 / 重置存档。
+ * 主菜单场景：标题 / 金币 / 角色选择 / 天赋升级 / 地图选择 / 开始游戏 / 重置存档。
+ *
+ * 「天赋」与「地图」共用同一块可视区（getPanelViewport，即原天赋列表区域），
+ * 横向滑动切换、上方角色选择不受影响；布局位置与改动前一致。
+ * 地图定义见 maps.js；沙漠需击败隐藏 Boss 后才解锁并出现在列表里。
  *
  * 所有 UI 元素的位置都通过 getXxxRect() 函数返回矩形，
  *   - 调位置改这些函数即可
@@ -17,30 +21,67 @@
  */
 
 const { W, H } = require("./config.js");
-const { CHARACTERS } = require("./characters.js");
+const { CHARACTERS, isCharacterUnlocked } = require("./characters.js");
 const { TALENTS } = require("./talents.js");
 const storage = require("./storage.js");
 const audio = require("./audio.js");
 const { UPGRADE_POOL, RARITY_COLORS } = require("./upgrades.js");
+const { MAPS, getVisibleMaps, resolveSelectedMap, getMapById, isMapUnlocked } = require("./maps.js");
+const { BOSS_VARIANTS } = require("./enemies.js");
+const { MECHANICS } = require("./mechanics.js");
+const { drawOceanSwatch } = require("./oceanVisuals.js");
+const { drawCharacterTexture } = require("./characterVisuals.js");
+const { drawGrasslandSwatch, drawWindrunnerShape } = require("./grasslandVisuals.js");
+const { drawTidecallerShape } = require("./tidecallerVisuals.js");
 
-const UPGRADE_PICK_PAGE_SIZE = 9;
+/**
+ * ---------------------------------------------------------------------------
+ *  开发者控制台（DEV）
+ * ---------------------------------------------------------------------------
+ *  结构：一份**声明式 schema**（DEV_SCHEMA）描述所有分组与行，
+ *  布局引擎 devLayout() 把它算成一串矩形，绘制与点击**读同一份布局**——
+ *  以前两边各写一遍、加一行就要重算一堆魔法数字，那是上一版最大的坑。
+ *
+ *  行类型：
+ *    choice   单选（互斥），如起始等级 / 地图 / Boss 形态
+ *    toggles  多个独立开关，如无敌 / 一击 / 十倍速
+ *    actions  点一下就执行，如 +金币
+ *    cards    词条自选网格（分页，只在需要时出现）
+ *
+ *  面板体可纵向滚动，所以加行不再受"必须塞进一屏"的限制。
+ * ---------------------------------------------------------------------------
+ */
 
-/** DEV「自选词条」卡片区纵向尺寸（必须与 getDevUpgradeNavRects / getDevUpgradeCardRect 一致） */
-const DEV_NAV_H = 30;
-const DEV_NAV_TO_GRID_GAP = 8;
+/** 面板内边距与行度量 */
+const DEV_PAD = 16;
+const DEV_HEADER_H = 44;
+const DEV_FOOTER_H = 54;
+const DEV_ROW_LABEL_H = 20;      // 行标题占高
+const DEV_BTN_H = 30;            // 选项按钮高
+const DEV_ROW_GAP = 14;          // 行与行的间距
+const DEV_SECTION_GAP = 18;      // 分组标题上方留白
+const DEV_SECTION_H = 22;        // 分组标题占高
+const DEV_BTN_GAP = 6;           // 同一行内按钮间距
+const DEV_MAX_PER_LINE = 5;      // 一行最多几个按钮，超了自动换行
+
+/** 词条自选网格 */
 const DEV_CARD_H = 34;
-const DEV_CARD_ROW_GAP = 8;
-const DEV_GRID_ROWS = 3;
-function devPickCardsBlockHeight() {
-  const gridH = DEV_GRID_ROWS * DEV_CARD_H + (DEV_GRID_ROWS - 1) * DEV_CARD_ROW_GAP;
-  return DEV_NAV_H + DEV_NAV_TO_GRID_GAP + gridH + 16;
+const DEV_CARD_GAP = 8;
+const DEV_CARD_COLS = 3;
+const DEV_CARD_ROWS = 3;
+const UPGRADE_PICK_PAGE_SIZE = DEV_CARD_COLS * DEV_CARD_ROWS;
+const DEV_CARD_NAV_H = 30;
+
+/**
+  * DEV 功能（入口、面板、触控）是否可见。
+  * 默认关闭；在设置面板里输入兑换码 912989446 后永久解锁（存档字段 devConsoleUnlocked）。
+  * 想强制开启调试就把整个函数体改成 return true。
+  */
+function devEnabled() {
+  return storage.get().devConsoleUnlocked === true;  return storage.get().devConsoleUnlocked === true;
 }
 
-/** 临时开关：false 时隐藏整个 DEV 功能（入口、面板、触控） */
-const DEV_ENABLED = false
-
 /** DEV 面板：标题底部到首行控件之间留白（避免「开发者调试」与「起始等级」挤叠） */
-const DEV_PANEL_BODY_TOP = 62;
 
 /**
  * 创建菜单场景实例。
@@ -49,30 +90,6 @@ const DEV_PANEL_BODY_TOP = 62;
  */
 function createMenuScene(options) {
   const { onStart } = options;
-  let strikerMenuIconImg = null;
-  let strikerMenuIconReady = false;
-  let taffyMenuIconImg = null;
-  let taffyMenuIconReady = false;
-  if (typeof wx !== "undefined" && typeof wx.createImage === "function") {
-    try {
-      strikerMenuIconImg = wx.createImage();
-      strikerMenuIconImg.onload = () => { strikerMenuIconReady = true; };
-      strikerMenuIconImg.onerror = () => { strikerMenuIconReady = false; };
-      strikerMenuIconImg.src = "subpackages/pkg_assets/images/character_striker.png";
-    } catch (e) {
-      strikerMenuIconImg = null;
-      strikerMenuIconReady = false;
-    }
-    try {
-      taffyMenuIconImg = wx.createImage();
-      taffyMenuIconImg.onload = () => { taffyMenuIconReady = true; };
-      taffyMenuIconImg.onerror = () => { taffyMenuIconReady = false; };
-      taffyMenuIconImg.src = "subpackages/pkg_assets/images/character_taffy.png";
-    } catch (e) {
-      taffyMenuIconImg = null;
-      taffyMenuIconReady = false;
-    }
-  }
   const initSave = storage.get();
   audio.setEnabled(initSave.musicOn !== false);
   audio.setVolume(initSave.musicVolume == null ? 1 : initSave.musicVolume);
@@ -82,6 +99,16 @@ function createMenuScene(options) {
   const MENU_SHIFT_Y = 60;
   /** 每条天赋占位高度（与 getTalentRect 内 h + 间距对齐） */
   const TALENTS_ROW_STEP = 56;
+  /** 每张地图卡占位高度（与 getMapRect 内 h + 间距对齐） */
+  const MAPS_ROW_STEP = 76;
+  /** 「天赋 ↔ 地图」分页：横向拖动超过该比例（相对屏宽）即翻页 */
+  const PANEL_SWIPE_RATIO = 0.2;
+  /** 翻页回弹/入场动画时长（毫秒） */
+  const PANEL_SLIDE_MS = 180;
+  /** 面板页序：0=天赋 1=地图 */
+  const PANEL_PAGE_TALENTS = 0;
+  const PANEL_PAGE_MAPS = 1;
+  const PANEL_PAGE_COUNT = 2;
   const state = {
     selectedIndex: 0,    // 当前选中的角色卡片索引
     flashMessage: "",    // 短暂提示信息（如金币不足、已达上限）
@@ -93,6 +120,25 @@ function createMenuScene(options) {
     charTouchStartY: 0,
     charTouchMoved: false,
     charTouchCandidateIndex: -1,
+
+    /**
+     * 天赋 / 地图分页（同一块可视区，横向滑动切换；角色选择始终在上方不受影响）
+     *   panelPage      当前页：0=天赋 1=地图
+     *   panelSlideX    横向偏移（拖拽跟手 + 翻页动画），0 表示停在当前页
+     *   panelSlideFrom 动画起点，配合 panelSlideMs 做缓动
+     *   panelAxis      本次拖拽已判定的方向：null 未定 / "x" 翻页 / "y" 滚动
+     */
+    panelPage: PANEL_PAGE_TALENTS,
+    panelSlideX: 0,
+    panelSlideFrom: 0,
+    panelSlideMs: 0,
+    panelAxis: null,
+    panelDragging: false,
+
+    /** 地图列表纵向滚动 */
+    mapsScrollY: 0,
+    /** 当前选中的地图 id（初值取存档，见 maps.js resolveSelectedMap） */
+    selectedMapId: resolveSelectedMap(initSave).id,
 
     /** 天赋列表纵向滚动（可点区域不足时滚动，避免压住「开始游戏」） */
     talentsScrollY: 0,
@@ -108,48 +154,204 @@ function createMenuScene(options) {
 
     // ---------- DEV 调试面板 ----------
     devOpen: false,
-    devUpgradePage: 0, // 起手升级自选：分页索引
-    devUpgradePickerTarget: null, // null | "startPick" | "forcePick"
+    devScrollY: 0,                 // 面板体纵向滚动
+    devScrollActive: false,
+    devScrollLastY: 0,
+    devScrollMoved: false,
+    devUpgradePage: 0,             // 词条自选：分页索引
+    /** 词条自选面向谁：null 不显示 / "start" 起手词条 / "force" 本局必出 */
+    devPickerTarget: null,
     debug: {
       startLevel: 5,
       startWave: 1,
       startBossVariant: "random",
       forceUpgradeIds: [],
-      /** none | randomByLevel | pickCards —— 「随机×等级」= 抽取约 (起始等级−1) 条加权随机起手升级 */
+      /** none | randomByLevel | pickCards */
       upgradeStartMode: "none",
       pickUpgradeIds: [],
-      /** 仅「以调试启动」传入战斗：无伤（敌弹 / 撞击） */
+      /** 以下三项仅「调试启动」时传入战斗 */
       godMode: false,
-      /** 玩家炮弹与轨道卫星等对敌伤害至少清空当前生命值（虚空核心解锁前无效） */
       oneHitKill: false,
-      /** 战斗逻辑时间缩放×10（与无敌/一击互不排斥） */
       gameSpeed10x: false,
+      /** 各机制的 DEV 强制态 { 机制id: 档位 }；档位见 mechanics.js devModes */
+      mechanics: {},
     },
   };
 
-  const LEVEL_PRESETS = [5, 6, 7, 8, 10, 15, 20];
-  const WAVE_PRESETS = [
-    { v: 1, label: "阶段1" },
-    { v: 2, label: "阶段2" },
-    { v: 3, label: "Boss" },
+  /**
+   * DEV 控制台的全部内容都在这里声明。加一行只要往数组里加一项，
+   * 布局、绘制、点击都会自动跟上——不需要再去改任何坐标。
+   */
+  const DEV_SCHEMA = [
+    { type: "section", label: "开局设定" },
+    {
+      type: "choice", id: "level", label: "起始等级",
+      options: [5, 6, 7, 8, 10, 15, 20].map((v) => ({ v, label: String(v) })),
+      get: () => state.debug.startLevel,
+      set: (v) => { state.debug.startLevel = v; },
+    },
+    {
+      type: "choice", id: "wave", label: "起始阶段",
+      options: [
+        { v: 1, label: "阶段1" },
+        { v: 2, label: "阶段2" },
+        { v: 3, label: "Boss" },
+      ],
+      get: () => state.debug.startWave,
+      set: (v) => { state.debug.startWave = v; },
+    },
+    {
+      // 地图：直接改菜单选中的地图（与地图页共用 state.selectedMapId），
+      // 未解锁的沙漠在 DEV 里也允许选——调试就是要能去没解锁的地方
+      type: "choice", id: "map", label: "地图",
+      options: () => MAPS.map((m) => ({ v: m.id, label: m.name })),
+      get: () => state.selectedMapId,
+      set: (v) => {
+        state.selectedMapId = v;
+        storage.unlockMap(v);
+        storage.setSelectedMapId(v);
+      },
+    },
+    {
+      // 选项从 enemies.js 的 BOSS_VARIANTS 派生：加一个 Boss 只要在那边登记，
+      // 这里自动出现，不会再有"菜单里能选但实际不生效"的漏改
+      type: "choice", id: "boss", label: "Boss 形态",
+      options: () => [{ v: "random", label: "随机" }].concat(
+        BOSS_VARIANTS.filter((b) => b.forceable).map((b) => ({ v: b.id, label: b.name })),
+      ),
+      get: () => state.debug.startBossVariant,
+      set: (v) => { state.debug.startBossVariant = v; },
+    },
+
+    { type: "section", label: "战场机制", visible: () => currentMapMechanics().length > 0 },
+
+    { type: "section", label: "作弊开关" },
+    {
+      type: "toggles", id: "cheats", label: "本局生效",
+      items: [
+        { key: "godMode", label: "无敌" },
+        { key: "oneHitKill", label: "一击必杀" },
+        { key: "gameSpeed10x", label: "十倍速" },
+      ],
+      get: (k) => !!state.debug[k],
+      set: (k) => { state.debug[k] = !state.debug[k]; },
+    },
+
+    { type: "section", label: "词条" },
+    {
+      type: "choice", id: "upgradeMode", label: "起手词条",
+      options: [
+        { v: "none", label: "无" },
+        { v: "randomByLevel", label: "随机×等级" },
+        { v: "pickCards", label: "自选" },
+      ],
+      get: () => state.debug.upgradeStartMode,
+      set: (v) => {
+        state.debug.upgradeStartMode = v;
+        // 选「自选」就把词条网格切到起手词条，否则收起
+        state.devPickerTarget = v === "pickCards" ? "start" : null;
+        state.devUpgradePage = 0;
+      },
+    },
+    {
+      type: "choice", id: "forceMode", label: "本局必出",
+      options: [
+        { v: false, label: "关闭" },
+        { v: true, label: "指定词条" },
+      ],
+      get: () => state.debug.forceUpgradeIds.length > 0 || state.devPickerTarget === "force",
+      set: (v) => {
+        if (v) {
+          state.devPickerTarget = "force";
+          state.devUpgradePage = 0;
+        } else {
+          state.debug.forceUpgradeIds = [];
+          if (state.devPickerTarget === "force") {
+            state.devPickerTarget = state.debug.upgradeStartMode === "pickCards" ? "start" : null;
+          }
+        }
+      },
+    },
+    {
+      // 词条自选网格：只在有目标时出现，标题会说明正在为谁选
+      type: "cards", id: "picker",
+      visible: () => state.devPickerTarget !== null,
+      label: () => (state.devPickerTarget === "force"
+        ? `选择「本局必出」词条（已选 ${state.debug.forceUpgradeIds.length}）`
+        : `选择「起手」词条（已选 ${state.debug.pickUpgradeIds.length}）`),
+      selectedIds: () => (state.devPickerTarget === "force"
+        ? state.debug.forceUpgradeIds
+        : state.debug.pickUpgradeIds),
+      toggle: (id) => {
+        const arr = state.devPickerTarget === "force"
+          ? state.debug.forceUpgradeIds
+          : state.debug.pickUpgradeIds;
+        const i = arr.indexOf(id);
+        if (i >= 0) arr.splice(i, 1); else arr.push(id);
+      },
+    },
+
+    { type: "section", label: "存档" },
+    {
+      type: "actions", id: "coins", label: "金币",
+      items: [
+        { label: "+1000", run: () => { storage.addCoins(1000); flash("+1000 金币"); } },
+        { label: "+1 万", run: () => { storage.addCoins(10000); flash("+10000 金币"); } },
+        { label: "+100 万", run: () => { storage.addCoins(1000000); flash("+1000000 金币"); } },
+      ],
+    },
+    {
+      type: "actions", id: "unlockAll", label: "解锁",
+      items: [
+        {
+          label: "全部角色",
+          run: () => {
+            CHARACTERS.forEach((c) => storage.unlockCharacter(c.id));
+            flash("已解锁全部角色");
+          },
+        },
+        {
+          label: "全部地图",
+          run: () => {
+            MAPS.forEach((m) => storage.unlockMap(m.id));
+            flash("已解锁全部地图");
+          },
+        },
+      ],
+    },
   ];
-  const BOSS_VARIANT_PRESETS = [
-    { v: "random", label: "随机Boss" },
-    { v: "crimson", label: "红Boss" },
-    { v: "azure", label: "蓝Boss" },
-    { v: "void", label: "虚空Boss" },
-    /** 直接进入虚空二阶段核心战（与起始阶段可同时设；仍以调试启动进战斗） */
-    { v: "voidCore", label: "虚空二阶段" },
-  ];
-  const UPGRADE_MODE_PRESETS = [
-    { mode: "none", label: "无" },
-    { mode: "randomByLevel", label: "随机×等级" },
-    { mode: "pickCards", label: "自选词条" },
-  ];
-  const FORCE_UPGRADE_ACTIONS = [
-    { a: "off", label: "关闭" },
-    { a: "pick", label: "菜单选取" },
-  ];
+
+  /** 当前选中地图启用了哪些机制（有 devModes 的才需要在控制台露出） */
+  function currentMapMechanics() {
+    const m = getMapById(state.selectedMapId);
+    const ids = Object.keys((m && m.mechanics) || {});
+    return MECHANICS.filter((mc) => ids.indexOf(mc.id) >= 0 && mc.devModes);
+  }
+
+  /**
+   * 实际渲染用的 schema：在「战场机制」分组后按当前地图动态插入机制行。
+   * 换地图时行会自己跟着变——加一个新机制不用碰这里。
+   */
+  function devSchema() {
+    const out = [];
+    DEV_SCHEMA.forEach((row) => {
+      out.push(row);
+      if (row.type === "section" && row.label === "战场机制") {
+        currentMapMechanics().forEach((mc) => {
+          out.push({
+            type: "choice",
+            id: "mech_" + mc.id,
+            label: mc.name,
+            options: mc.devModes,
+            get: () => state.debug.mechanics[mc.id] || "auto",
+            set: (v) => { state.debug.mechanics[mc.id] = v; },
+          });
+        });
+      }
+    });
+    return out;
+  }
+
   /** 键必须与 tryRedeemByCode 一致：用户输入会 trim 并转成大写再查表 */
   const REDEEM_CODE_REWARDS = {
     // "WELCOME1000": { coins: 1000, msg: "欢迎礼包：+1000 金币" },
@@ -158,6 +360,8 @@ function createMenuScene(options) {
     THELONGUSERNAME: { coins: 27782778, msg: "兑换成功：+27782778 金币" },
     "7777777": { unlockCharacterId: "prism", msg: "已解锁角色：棱镜" },
     "TAFFY": { unlockCharacterId: "taffy", msg: "已解锁角色：永雏塔菲" },
+    /** 开发者控制台：解锁后主菜单右上角出现 DEV 入口 */
+    "912989446": { unlockDevConsole: true, msg: "已解锁开发者控制台" },
   };
 
   const rememberedId = initSave.selectedCharacterId || "striker";
@@ -173,11 +377,12 @@ function createMenuScene(options) {
   }
 
   function isUnlocked(save, character) {
-    if (character.unlockByCodeOnly) {
-      return !!(save.unlockedCharacters && save.unlockedCharacters[character.id]);
-    }
-    if (!character.unlockCost || character.unlockCost <= 0) return true;
-    return !!(save.unlockedCharacters && save.unlockedCharacters[character.id]);
+    return isCharacterUnlocked(save, character);
+  }
+
+  function characterUnlockHint(character) {
+    return character.unlockHint || (character.unlockByCodeOnly
+      ? `${character.name} 需要兑换码解锁` : `${character.name} 需要 ${character.unlockCost} 金币解锁`);
   }
 
   /** 菜单可见角色索引：兑换码专属角色未解锁前不展示 */
@@ -251,6 +456,84 @@ function createMenuScene(options) {
     return { x: 0, y, w: W, h };
   }
 
+  // ---------- 「天赋 ↔ 地图」分页 ----------
+
+  /** 分页可视区（与天赋可视区同一块矩形，布局不变） */
+  function getPanelViewport() {
+    return getTalentViewport();
+  }
+
+  function isMapsPage() {
+    return state.panelPage === PANEL_PAGE_MAPS;
+  }
+
+  /** 拖拽/动画中的另一页（只有两页，来回都指向对面那页） */
+  function otherPanelPage() {
+    return (state.panelPage + 1) % PANEL_PAGE_COUNT;
+  }
+
+  /**
+   * 相邻页的绘制偏移：手指往右拖（slideX>0）时另一页从左侧进场，往左拖时从右侧进场。
+   * 这样「右滑天赋栏」和反向滑动都能切到地图页。
+   */
+  function neighborPanelOffset() {
+    if (state.panelSlideX === 0) return 0;
+    return state.panelSlideX > 0 ? state.panelSlideX - W : state.panelSlideX + W;
+  }
+
+  /** 翻到指定页，并从当前拖拽位置缓动归位 */
+  function goPanelPage(page) {
+    if (page === state.panelPage) {
+      state.panelSlideFrom = state.panelSlideX;
+      state.panelSlideMs = PANEL_SLIDE_MS;
+      return;
+    }
+    state.panelPage = page;
+    // 换页后，新页此刻正处在 neighborPanelOffset() 的位置，从那里缓动到 0
+    state.panelSlideX = neighborPanelOffset() === 0
+      ? (state.panelSlideX > 0 ? -W : W)
+      : neighborPanelOffset();
+    state.panelSlideFrom = state.panelSlideX;
+    state.panelSlideMs = PANEL_SLIDE_MS;
+  }
+
+  /** 每帧推进翻页缓动（easeOutCubic） */
+  function stepPanelSlide(delta) {
+    if (state.panelSlideMs <= 0) {
+      if (!state.panelDragging) state.panelSlideX = 0;
+      return;
+    }
+    state.panelSlideMs = Math.max(0, state.panelSlideMs - delta);
+    const t = 1 - state.panelSlideMs / PANEL_SLIDE_MS;
+    const eased = 1 - Math.pow(1 - t, 3);
+    state.panelSlideX = state.panelSlideFrom * (1 - eased);
+    if (state.panelSlideMs <= 0) state.panelSlideX = 0;
+  }
+
+  // ---------- 地图列表布局 ----------
+
+  function mapsMaxScroll() {
+    const v = getPanelViewport();
+    return Math.max(0, getVisibleMaps(storage.get()).length * MAPS_ROW_STEP - v.h);
+  }
+
+  function clampMapsScroll() {
+    const mx = mapsMaxScroll();
+    if (state.mapsScrollY < 0) state.mapsScrollY = 0;
+    else if (state.mapsScrollY > mx) state.mapsScrollY = mx;
+  }
+
+  /** 单张地图卡矩形（与天赋条同样的左右边距；dx 为翻页动画偏移） */
+  function getMapRect(i, dx) {
+    const top = getTalentListTop();
+    return {
+      x: 20 + (dx || 0),
+      y: top + i * MAPS_ROW_STEP - state.mapsScrollY,
+      w: W - 40,
+      h: 68,
+    };
+  }
+
   function talentsMaxScroll() {
     const v = getTalentViewport();
     return Math.max(0, TALENTS.length * TALENTS_ROW_STEP - v.h);
@@ -263,8 +546,8 @@ function createMenuScene(options) {
   }
 
   /** 单条天赋矩形：左右各 20px 边距，垂直间距嵌入 TALENTS_ROW_STEP，本体高 50px */
-  function getTalentRect(i) {
-    const x = 20;
+  function getTalentRect(i, dx) {
+    const x = 20 + (dx || 0);
     const top = getTalentListTop();
     const y = top + i * TALENTS_ROW_STEP - state.talentsScrollY;
     const w = W - 40;
@@ -273,8 +556,8 @@ function createMenuScene(options) {
   }
 
   /** 天赋升级按钮：贴在天赋条右侧，宽 80 高 34 */
-  function getTalentButtonRect(i) {
-    const r = getTalentRect(i);
+  function getTalentButtonRect(i, dx) {
+    const r = getTalentRect(i, dx);
     const bw = 80;
     return { x: r.x + r.w - bw - 8, y: r.y + 8, w: bw, h: r.h - 16 };
   }
@@ -306,74 +589,6 @@ function createMenuScene(options) {
   /** 主菜单右上角 DEV 入口按钮（占用原“重置存档”位置） */
   function getDevButtonRect() {
     return { x: W - 60, y: 24 + MENU_SHIFT_Y, w: 46, h: 26 };
-  }
-
-  /** 调试面板整体矩形（覆盖菜单中部） */
-  function getDevPanelRect() {
-    const margin = 16;
-    const top = 70 + MENU_SHIFT_Y;
-    // 下边距稍收，让给面板本体（自选词条卡片区可以更靠下占位）
-    return { x: margin, y: top, w: W - margin * 2, h: H - top - 40 };
-  }
-
-  /** 一行预设按钮里的第 i 个按钮矩形 */
-  function devRowRect(rowY, count, i) {
-    const panel = getDevPanelRect();
-    const padX = 16;
-    const inner = panel.w - padX * 2;
-    const gap = 6;
-    const bw = (inner - gap * (count - 1)) / count;
-    return { x: panel.x + padX + i * (bw + gap), y: rowY, w: bw, h: 30 };
-  }
-
-  /** 各行 Y（金币在自选卡片区之上；自选词条区在 pickCards 时向下锚定以利用面板下方空间） */
-  function devRowYs() {
-    const panel = getDevPanelRect();
-    const base = panel.y + DEV_PANEL_BODY_TOP;
-    const rowStep = 58;
-    const levelRow = base;
-    const waveRow = base + rowStep;
-    const bossRow = waveRow + rowStep;
-    const modeRow = bossRow + rowStep;
-    const godRow = modeRow + rowStep;
-    const forceRow = godRow + rowStep;
-    // 「本局必出升级」行与金币行之间留白（hints 注释掉后也保留间距，便于以后恢复文案）
-    const forceStatusReserve = 52;
-    const coinsGapBelowForceStatus = 14;
-    const coinsRow =
-      forceRow + 0 + forceStatusReserve + coinsGapBelowForceStatus;
-    const hintY = coinsRow + 36;
-    const pickCards = state.debug.upgradeStartMode === "pickCards";
-    const forcePick = state.devUpgradePickerTarget === "forcePick";
-    const footerY = panel.y + panel.h - 50;
-    const showCards = pickCards || forcePick;
-    const cardBlockH = showCards ? devPickCardsBlockHeight() : 0;
-    let cardsTop = hintY + (showCards ? 14 : 22);
-    if (showCards) {
-      const minTop = hintY + 26;
-      const anchorTop = footerY - 12 - cardBlockH;
-      cardsTop = Math.max(minTop, anchorTop);
-      if (cardsTop + cardBlockH > footerY - 10) {
-        cardsTop = footerY - 12 - cardBlockH;
-      }
-    }
-    return {
-      panel,
-      base,
-      level: levelRow,
-      wave: waveRow,
-      boss: bossRow,
-      mode: modeRow,
-      god: godRow,
-      force: forceRow,
-      hintY,
-      cardsTop,
-      coins: coinsRow,
-      footer: footerY,
-      pickCards,
-      forcePick,
-      showCards,
-    };
   }
 
   /** 主菜单左上角金币卡片右侧「设置」按钮 */
@@ -444,63 +659,158 @@ function createMenuScene(options) {
     }
     if (reward.coins > 0) storage.addCoins(reward.coins);
     if (reward.unlockCharacterId) storage.unlockCharacter(reward.unlockCharacterId);
+    if (reward.unlockDevConsole) storage.setDevConsoleUnlocked(true);
     storage.setRedeemedCode(code, true);
     flash(reward.msg);
   }
+  /** 调试面板整体矩形（覆盖菜单中部） */
+  function getDevPanelRect() {
+    const margin = 16;
+    const top = 70 + MENU_SHIFT_Y;
+    return { x: margin, y: top, w: W - margin * 2, h: H - top - 40 };
+  }
 
-  /** 起手升级分页：上一页／下一页 */
-  function getDevUpgradeNavRects() {
-    const ys = devRowYs();
-    const { panel } = ys;
-    const y = ys.cardsTop;
-    const bw = Math.min(100, Math.floor(panel.w / 5));
-    const h = DEV_NAV_H;
+  /** 面板体（可滚动区）：标题栏与底栏之间 */
+  function getDevBodyRect() {
+    const p = getDevPanelRect();
     return {
-      prev: { x: panel.x + 16, y, w: bw, h },
-      next: { x: panel.x + panel.w - 16 - bw, y, w: bw, h },
+      x: p.x,
+      y: p.y + DEV_HEADER_H,
+      w: p.w,
+      h: p.h - DEV_HEADER_H - DEV_FOOTER_H,
     };
   }
 
-  /** slot 0~8 → 卡片矩形（自选词条 3×3） */
-  function getDevUpgradeCardRect(slot) {
-    const ys = devRowYs();
-    const innerX = ys.panel.x + 16;
-    const innerW = ys.panel.w - 32;
-    const gap = DEV_CARD_ROW_GAP;
-    const col = slot % 3;
-    const row = Math.floor(slot / 3);
-    const cw = (innerW - gap * 2) / 3;
-    const ch = DEV_CARD_H;
-    const x = innerX + col * (cw + gap);
-    const y =
-      ys.cardsTop +
-      DEV_NAV_H +
-      DEV_NAV_TO_GRID_GAP +
-      row * (ch + DEV_CARD_ROW_GAP);
-    return { x, y, w: cw, h: ch };
-  }
-
-  /** 起手升级页数（用于分页） */
   function devUpgradePageCount() {
     return Math.max(1, Math.ceil(UPGRADE_POOL.length / UPGRADE_PICK_PAGE_SIZE));
   }
 
+  /** schema 里的 options 允许写成函数（地图这类动态列表） */
+  function devOptionsOf(row) {
+    return typeof row.options === "function" ? row.options() : row.options;
+  }
+  function devLabelOf(row) {
+    return typeof row.label === "function" ? row.label() : row.label;
+  }
+
+  /**
+   * 布局引擎：把 DEV_SCHEMA 算成一串带坐标的元素。
+   * **绘制与点击都读它**，所以两边永远不会不一致。
+   * 返回 { items, contentH }；items 里每项都带 kind + 矩形。
+   */
+  function devLayout() {
+    const body = getDevBodyRect();
+    const innerX = body.x + DEV_PAD;
+    const innerW = body.w - DEV_PAD * 2;
+    const items = [];
+    let y = body.y + 8 - state.devScrollY;
+
+    devSchema().forEach((row) => {
+      if (row.visible && !row.visible()) return;
+
+      if (row.type === "section") {
+        y += DEV_SECTION_GAP;
+        items.push({ kind: "section", label: row.label, x: innerX, y });
+        y += DEV_SECTION_H;
+        return;
+      }
+
+      // 行标题
+      items.push({ kind: "label", label: devLabelOf(row), x: innerX, y });
+      y += DEV_ROW_LABEL_H;
+
+      if (row.type === "cards") {
+        // 分页导航
+        const navW = 64;
+        items.push({
+          kind: "cardsNav", row,
+          prev: { x: innerX, y, w: navW, h: DEV_CARD_NAV_H },
+          next: { x: innerX + innerW - navW, y, w: navW, h: DEV_CARD_NAV_H },
+          centerX: innerX + innerW / 2,
+          centerY: y + DEV_CARD_NAV_H / 2,
+        });
+        y += DEV_CARD_NAV_H + DEV_CARD_GAP;
+
+        const cw = (innerW - DEV_CARD_GAP * (DEV_CARD_COLS - 1)) / DEV_CARD_COLS;
+        const page = Math.max(0, Math.min(state.devUpgradePage, devUpgradePageCount() - 1));
+        const start = page * UPGRADE_PICK_PAGE_SIZE;
+        for (let i = 0; i < UPGRADE_PICK_PAGE_SIZE; i += 1) {
+          const u = UPGRADE_POOL[start + i];
+          if (!u) break;
+          const c = i % DEV_CARD_COLS;
+          const r = Math.floor(i / DEV_CARD_COLS);
+          items.push({
+            kind: "card", row, upgrade: u,
+            rect: {
+              x: innerX + c * (cw + DEV_CARD_GAP),
+              y: y + r * (DEV_CARD_H + DEV_CARD_GAP),
+              w: cw, h: DEV_CARD_H,
+            },
+          });
+        }
+        y += DEV_CARD_ROWS * DEV_CARD_H + (DEV_CARD_ROWS - 1) * DEV_CARD_GAP + DEV_ROW_GAP;
+        return;
+      }
+
+      // choice / toggles / actions 都是按钮行，按 DEV_MAX_PER_LINE 自动换行
+      const cells = row.type === "choice" ? devOptionsOf(row)
+        : row.type === "toggles" ? row.items
+        : row.items;
+      const perLine = Math.min(DEV_MAX_PER_LINE, cells.length);
+      const lines = Math.ceil(cells.length / perLine);
+      for (let li = 0; li < lines; li += 1) {
+        const from = li * perLine;
+        const slice = cells.slice(from, from + perLine);
+        const bw = (innerW - DEV_BTN_GAP * (slice.length - 1)) / slice.length;
+        slice.forEach((cell, i) => {
+          items.push({
+            kind: "btn", row, cell, cellIndex: from + i,
+            rect: {
+              x: innerX + i * (bw + DEV_BTN_GAP),
+              y: y + li * (DEV_BTN_H + DEV_BTN_GAP),
+              w: bw, h: DEV_BTN_H,
+            },
+          });
+        });
+      }
+      y += lines * DEV_BTN_H + (lines - 1) * DEV_BTN_GAP + DEV_ROW_GAP;
+    });
+
+    const contentH = y + state.devScrollY - (body.y + 8);
+    return { items, contentH, body };
+  }
+
+  function devMaxScroll() {
+    const body = getDevBodyRect();
+    const prev = state.devScrollY;
+    state.devScrollY = 0;
+    const h = devLayout().contentH;
+    state.devScrollY = prev;
+    return Math.max(0, h - body.h + 16);
+  }
+
+  function clampDevScroll() {
+    const mx = devMaxScroll();
+    if (state.devScrollY < 0) state.devScrollY = 0;
+    else if (state.devScrollY > mx) state.devScrollY = mx;
+  }
+
+  // ---------- 底栏按钮 ----------
+  function devFooterY() {
+    const p = getDevPanelRect();
+    return p.y + p.h - DEV_FOOTER_H + 8;
+  }
   function getDevCancelRect() {
-    const w = 90;
-    const h = 38;
-    return { x: devRowYs().panel.x + 16, y: devRowYs().footer, w, h };
+    const p = getDevPanelRect();
+    return { x: p.x + DEV_PAD, y: devFooterY(), w: 88, h: 38 };
   }
-
-  function getDevStartRect() {
-    const w = 130;
-    const h = 38;
-    return { x: devRowYs().panel.x + devRowYs().panel.w - 16 - w, y: devRowYs().footer, w, h };
-  }
-
   function getDevResetRect() {
-    const w = 96;
-    const h = 38;
-    return { x: devRowYs().panel.x + (devRowYs().panel.w - w) / 2, y: devRowYs().footer, w, h };
+    const p = getDevPanelRect();
+    return { x: p.x + (p.w - 96) / 2, y: devFooterY(), w: 96, h: 38 };
+  }
+  function getDevStartRect() {
+    const p = getDevPanelRect();
+    return { x: p.x + p.w - DEV_PAD - 128, y: devFooterY(), w: 128, h: 38 };
   }
 
   // ==========================================================================
@@ -515,6 +825,9 @@ function createMenuScene(options) {
     }
     normalizeCharScroll();
     clampTalentsScroll();
+    clampMapsScroll();
+    if (devEnabled() && state.devOpen) clampDevScroll();
+    stepPanelSlide(delta);
     state.flashTimer = Math.max(0, state.flashTimer - delta);
   }
 
@@ -608,14 +921,12 @@ function createMenuScene(options) {
       // 飞机图标（三角形，y 偏上 20px）
       const px = r.x + r.w / 2;
       const py = r.y + 20;
-      if (c.iconStyle === "strikerPortrait" && save.battleTexturesOn === true && strikerMenuIconImg && strikerMenuIconReady) {
-        const iw = 36;
-        const ih = 42;
-        ctx.drawImage(strikerMenuIconImg, px - iw / 2, py - 5, iw, ih);
-      } else if (c.iconStyle === "taffyPortrait" && save.battleTexturesOn === true && taffyMenuIconImg && taffyMenuIconReady) {
-        const iw = 34;
-        const ih = 40;
-        ctx.drawImage(taffyMenuIconImg, px - iw / 2, py - 4, iw, ih);
+      if (drawCharacterTexture(ctx, c.id, px - 18, py - 5, 36, 42, save.battleTexturesOn === true, "menu")) {
+        // 菜单与战斗共享角色素材。
+      } else if (c.id === "windrunner") {
+        drawWindrunnerShape(ctx, px - 18, py - 5, 36, 42, state);
+      } else if (c.id === "tidecaller") {
+        drawTidecallerShape(ctx, px - 18, py - 5, 36, 42, state);
       } else if (c.iconStyle === "rainbowTriangle") {
         const stripes = ["#ef4444", "#f59e0b", "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#a855f7"];
         const h = 28;
@@ -682,20 +993,32 @@ function createMenuScene(options) {
         ctx.fillText("已解锁", r.x + r.w / 2, r.y + r.h - 12);
       } else {
         ctx.fillStyle = "#fbbf24";
-        if (c.unlockByCodeOnly) ctx.fillText("兑换码解锁", r.x + r.w / 2, r.y + r.h - 12);
+        if (c.unlockByMap) ctx.fillText(c.unlockHint, r.x + r.w / 2, r.y + r.h - 12);
+        else if (c.unlockByCodeOnly) ctx.fillText("兑换码解锁", r.x + r.w / 2, r.y + r.h - 12);
         else ctx.fillText(`${c.unlockCost} 金币解锁`, r.x + r.w / 2, r.y + r.h - 12);
       }
       });
     }
     ctx.restore();
 
-    // ---------- 天赋区域标题 ----------
+    // ---------- 分页区标题（天赋 ↔ 地图，横向滑动切换） ----------
     ctx.fillStyle = "#e2e8f0";
     ctx.font = "bold 16px sans-serif"; // 区块标题字号 16
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    ctx.fillText("天赋", 20, 258 + MENU_SHIFT_Y);
+    ctx.fillText(isMapsPage() ? "地图" : "天赋", 20, 258 + MENU_SHIFT_Y);
+    // 页码圆点（提示这块区域可以横滑）
     {
+      const dotY = 258 + MENU_SHIFT_Y + 8;
+      for (let i = 0; i < PANEL_PAGE_COUNT; i += 1) {
+        ctx.fillStyle = i === state.panelPage ? "#e2e8f0" : "#475569";
+        ctx.beginPath();
+        ctx.arc(62 + i * 12, dotY, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // 「重置天赋」只属于天赋页
+    if (!isMapsPage()) {
       const rr = getTalentResetRect();
       ctx.fillStyle = "#7f1d1d";
       ctx.fillRect(rr.x, rr.y, rr.w, rr.h);
@@ -709,55 +1032,17 @@ function createMenuScene(options) {
       ctx.fillText("重置天赋", rr.x + rr.w / 2, rr.y + rr.h / 2);
     }
 
-    // ---------- 天赋列表（可纵向滚动） ----------
+    // ---------- 分页内容（天赋列表 / 地图列表，同一块可视区） ----------
     {
-      const tp = getTalentViewport();
+      const tp = getPanelViewport();
       ctx.save();
       ctx.beginPath();
       ctx.rect(tp.x, tp.y, tp.w, tp.h);
       ctx.clip();
-      TALENTS.forEach((t, i) => {
-        const r = getTalentRect(i);
-        const lv = save.talents[t.id] || 0;
-        const isMax = lv >= t.maxLevel;
-        const maxLvText = Number.isFinite(t.maxLevel) ? String(t.maxLevel) : "∞";
-
-        // 行背景
-        ctx.fillStyle = "#1e293b";
-        ctx.fillRect(r.x, r.y, r.w, r.h);
-        ctx.strokeStyle = "#334155";
-        ctx.strokeRect(r.x, r.y, r.w, r.h);
-
-        // 名称 + 等级（粗体 14）
-        ctx.fillStyle = "#f8fafc";
-        ctx.font = "bold 14px sans-serif";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        ctx.fillText(`${t.name}  Lv.${lv}/${maxLvText}`, r.x + 10, r.y + 8);
-
-        // 描述（11）
-        ctx.font = "11px sans-serif";
-        ctx.fillStyle = "#94a3b8";
-        ctx.fillText(t.desc, r.x + 10, r.y + 28);
-
-        // 升级按钮（绿色 / 满级灰）
-        const btn = getTalentButtonRect(i);
-        ctx.fillStyle = isMax ? "#334155" : "#15803d";
-        ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
-        ctx.fillStyle = "#fff";
-        ctx.font = "bold 12px sans-serif"; // 按钮字号 12
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        if (isMax) {
-          ctx.fillText("MAX", btn.x + btn.w / 2, btn.y + btn.h / 2);
-        } else {
-          ctx.fillText(
-            `升级 ${t.cost(lv)}金`,
-            btn.x + btn.w / 2,
-            btn.y + btn.h / 2
-          );
-        }
-      });
+      drawPanelPage(ctx, save, state.panelPage, state.panelSlideX);
+      if (state.panelSlideX !== 0) {
+        drawPanelPage(ctx, save, otherPanelPage(), neighborPanelOffset());
+      }
       ctx.restore();
     }
 
@@ -772,7 +1057,7 @@ function createMenuScene(options) {
     ctx.fillText("开始游戏", start.x + start.w / 2, start.y + start.h / 2);
 
     // ---------- DEV 入口按钮 ----------
-    if (DEV_ENABLED) {
+    if (devEnabled()) {
       const devBtn = getDevButtonRect();
       ctx.fillStyle = "rgba(124, 58, 237, 0.55)"; // 紫色（区别于其它按钮）
       ctx.fillRect(devBtn.x, devBtn.y, devBtn.w, devBtn.h);
@@ -921,7 +1206,7 @@ function createMenuScene(options) {
     }
 
     // ---------- DEV 面板（覆盖在菜单之上） ----------
-    if (DEV_ENABLED && state.devOpen) {
+    if (devEnabled() && state.devOpen) {
       drawDevPanel(ctx);
     }
   }
@@ -932,276 +1217,321 @@ function createMenuScene(options) {
    *   - 起手升级：「无」「随机×等级」「自选词条（分页卡片）」
    *   - 重置存档 / 取消 / 开始
    */
-  function drawDevPanel(ctx) {
-    // 半透明遮罩
-    ctx.fillStyle = "rgba(2, 6, 23, 0.78)";
-    ctx.fillRect(0, 0, W, H);
+  // ==========================================================================
+  //  分页内容绘制（天赋 / 地图）—— dx 为翻页动画的横向偏移
+  // ==========================================================================
 
-    const panel = getDevPanelRect();
-    ctx.fillStyle = "#0f172a";
-    ctx.fillRect(panel.x, panel.y, panel.w, panel.h);
-    ctx.strokeStyle = "#7c3aed";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(panel.x, panel.y, panel.w, panel.h);
+  function drawPanelPage(ctx, save, page, dx) {
+    if (page === PANEL_PAGE_MAPS) drawMapsPage(ctx, save, dx);
+    else drawTalentsPage(ctx, save, dx);
+  }
 
-    // 标题
-    ctx.fillStyle = "#a78bfa";
-    ctx.font = "bold 16px sans-serif";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText("开发者调试 (DEV)", panel.x + 16, panel.y + 10);
+  function drawTalentsPage(ctx, save, dx) {
+    TALENTS.forEach((t, i) => {
+      const r = getTalentRect(i, dx);
+      const lv = save.talents[t.id] || 0;
+      const isMax = lv >= t.maxLevel;
+      const maxLvText = Number.isFinite(t.maxLevel) ? String(t.maxLevel) : "∞";
 
-    const ys = devRowYs();
-
-    // 行 1：起始等级
-    drawDevRow(
-      ctx,
-      "起始等级",
-      ys.panel.x + 16,
-      ys.level - 22,
-      LEVEL_PRESETS,
-      ys.level,
-      (v) => v === state.debug.startLevel,
-      (v) => String(v)
-    );
-
-    // 行 2：起始阶段
-    drawDevRow(
-      ctx,
-      "起始阶段",
-      ys.panel.x + 16,
-      ys.wave - 22,
-      WAVE_PRESETS,
-      ys.wave,
-      (item) => item.v === state.debug.startWave,
-      (item) => item.label
-    );
-
-    // 行 3：Boss 形态（红/蓝/虚空仅起始阶段=Boss 时生效；「虚空二阶段」始终直达核心战）
-    drawDevRow(
-      ctx,
-      "Boss形态",
-      ys.panel.x + 16,
-      ys.boss - 22,
-      BOSS_VARIANT_PRESETS,
-      ys.boss,
-      (item) => state.debug.startBossVariant === item.v,
-      (item) => item.label
-    );
-
-    // 行 4：起手升级模式（无 / 按等级随机 / 自选卡片）
-    drawDevRow(
-      ctx,
-      "起手升级",
-      ys.panel.x + 16,
-      ys.mode - 22,
-      UPGRADE_MODE_PRESETS,
-      ys.mode,
-      (item) => state.debug.upgradeStartMode === item.mode,
-      (item) => item.label
-    );
-
-    // 本局调试：三张独立卡片，互不为排他选项（均仅「调试启动」时传入战斗）
-    ctx.fillStyle = "#cbd5e1";
-    ctx.font = "13px sans-serif";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText("本局调试", ys.panel.x + 16, ys.god - 22);
-    const devHudCards = [
-      { toggle: () => !!state.debug.godMode, label: "无敌模式" },
-      { toggle: () => !!state.debug.oneHitKill, label: "一击必杀" },
-      { toggle: () => !!state.debug.gameSpeed10x, label: "游戏十倍速" },
-    ];
-    devHudCards.forEach((card, i) => {
-      const r = devRowRect(ys.god, devHudCards.length, i);
-      const on = card.toggle();
-      ctx.fillStyle = on ? "#312e81" : "#1e293b";
-      ctx.fillRect(r.x, r.y, r.w, r.h);
-      ctx.strokeStyle = on ? "#a78bfa" : "#334155";
-      ctx.lineWidth = on ? 2 : 1;
-      ctx.strokeRect(r.x, r.y, r.w, r.h);
-      ctx.fillStyle = on ? "#e9d5ff" : "#94a3b8";
-      ctx.font = "bold 11px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(card.label, r.x + r.w / 2, r.y + r.h / 2);
-    });
-
-    // 本局必出升级（仅保证“出现”一次，不强制自动选择）
-    drawDevRow(
-      ctx,
-      "本局必出升级",
-      ys.panel.x + 16,
-      ys.force - 22,
-      FORCE_UPGRADE_ACTIONS,
-      ys.force,
-      (item) => item.a === "off" && state.debug.forceUpgradeIds.length <= 0,
-      (item) => item.label
-    );
-    /*
-    const forceCount = state.debug.forceUpgradeIds.length;
-    const forced = forceCount > 0
-      ? UPGRADE_POOL.filter((u) => state.debug.forceUpgradeIds.indexOf(u.id) >= 0)
-      : [];
-    ctx.fillStyle = "#94a3b8";
-    ctx.font = "11px sans-serif";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText(
-      forceCount > 0
-        ? `当前：已选 ${forceCount} 条（${forced.slice(0, 2).map((u) => u.name).join(" / ")}${forceCount > 2 ? " ..." : ""}）`
-        : "当前：关闭",
-      ys.panel.x + 16,
-      ys.force + 34
-    );
-    */
-
-    // 金币预设（存档 +1000 / +10000）
-    ctx.fillStyle = "#cbd5e1";
-    ctx.font = "13px sans-serif";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText("金币", ys.panel.x + 16, ys.coins - 22);
-    [
-      { label: "+1000", value: 1000 },
-      { label: "+10000", value: 10000 },
-    ].forEach((c, i) => {
-      const r = devRowRect(ys.coins, 2, i);
+      // 行背景
       ctx.fillStyle = "#1e293b";
       ctx.fillRect(r.x, r.y, r.w, r.h);
       ctx.strokeStyle = "#334155";
-      ctx.strokeRect(r.x, r.y, r.w, r.h);
-      ctx.fillStyle = "#fbbf24";
-      ctx.font = "bold 13px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(c.label, r.x + r.w / 2, r.y + r.h / 2);
-    });
-
-    /*
-    // 说明行
-    ctx.fillStyle = "#94a3b8";
-    ctx.font = "11px sans-serif";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    if (ys.forcePick) {
-      ctx.fillText(`「本局必出升级」：已选 ${forceCount} 条，点下方卡片可多选／取消`, ys.panel.x + 16, ys.hintY);
-    } else if (state.debug.upgradeStartMode === "randomByLevel") {
-      const n = Math.min(50, Math.max(0, state.debug.startLevel - 1));
-      ctx.fillText(`「随机×等级」：起手按稀有度加权随机约 ${n} 条升级（≈起始等级−1）`, ys.panel.x + 16, ys.hintY);
-    } else if (state.debug.upgradeStartMode === "pickCards") {
-      ctx.fillText(
-        `「自选词条」：已选 ${state.debug.pickUpgradeIds.length} 条，点此下方卡片可多选／翻页`,
-        ys.panel.x + 16,
-        ys.hintY
-      );
-    } else {
-      ctx.fillText("「无」：不开局发放起手升级。", ys.panel.x + 16, ys.hintY);
-    }
-    */
-
-    // 自选词条：分页导航 + 3×3 卡片
-    if (ys.showCards) {
-      const nav = getDevUpgradeNavRects();
-      const pg = Math.max(0, Math.min(state.devUpgradePage, devUpgradePageCount() - 1));
-      state.devUpgradePage = pg;
-
-      ctx.fillStyle = "#334155";
-      ctx.fillRect(nav.prev.x, nav.prev.y, nav.prev.w, nav.prev.h);
-      ctx.fillRect(nav.next.x, nav.next.y, nav.next.w, nav.next.h);
-      ctx.fillStyle = "#e2e8f0";
-      ctx.font = "bold 12px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("◀上一页", nav.prev.x + nav.prev.w / 2, nav.prev.y + nav.prev.h / 2);
-      ctx.fillText("下一页▶", nav.next.x + nav.next.w / 2, nav.next.y + nav.next.h / 2);
-
-      ctx.fillStyle = "#64748b";
-      ctx.font = "bold 12px sans-serif";
-      const midCx = nav.prev.x + nav.prev.w + (nav.next.x - (nav.prev.x + nav.prev.w)) / 2;
-      ctx.fillText(`${pg + 1}/${devUpgradePageCount()}`, midCx, nav.prev.y + nav.prev.h / 2);
-
-      const startIdx = pg * UPGRADE_PICK_PAGE_SIZE;
-      for (let s = 0; s < UPGRADE_PICK_PAGE_SIZE; s += 1) {
-        const ui = UPGRADE_POOL[startIdx + s];
-        if (!ui) break;
-        const r = getDevUpgradeCardRect(s);
-        const picked = ys.forcePick
-          ? state.debug.forceUpgradeIds.indexOf(ui.id) >= 0
-          : state.debug.pickUpgradeIds.indexOf(ui.id) >= 0;
-        const rim = RARITY_COLORS[ui.rarity] || "#64748b";
-        ctx.fillStyle = picked ? "#312e81" : "#1e293b";
-        ctx.fillRect(r.x, r.y, r.w, r.h);
-        ctx.strokeStyle = picked ? "#e879f9" : rim;
-        ctx.lineWidth = picked ? 2 : 1;
-        ctx.strokeRect(r.x, r.y, r.w, r.h);
-        ctx.fillStyle = rim;
-        ctx.font = "bold 11px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        const shortName = ui.name.length > 8 ? `${ui.name.slice(0, 7)}…` : ui.name;
-        ctx.fillText(shortName, r.x + r.w / 2, r.y + 4);
-        ctx.fillStyle = "#94a3b8";
-        ctx.font = "9px monospace";
-        ctx.textBaseline = "bottom";
-        ctx.fillText(ui.id.slice(0, 8), r.x + r.w / 2, r.y + r.h - 4);
-      }
-    }
-
-    // 底部按钮：取消 / 重置存档 / 开始
-    const cancelR = getDevCancelRect();
-    ctx.fillStyle = "#1e293b";
-    ctx.fillRect(cancelR.x, cancelR.y, cancelR.w, cancelR.h);
-    ctx.strokeStyle = "#475569";
-    ctx.strokeRect(cancelR.x, cancelR.y, cancelR.w, cancelR.h);
-    ctx.fillStyle = "#e2e8f0";
-    ctx.font = "bold 14px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("取消", cancelR.x + cancelR.w / 2, cancelR.y + cancelR.h / 2);
-
-    const resetR = getDevResetRect();
-    ctx.fillStyle = "#7f1d1d";
-    ctx.fillRect(resetR.x, resetR.y, resetR.w, resetR.h);
-    ctx.strokeStyle = "#fca5a5";
-    ctx.strokeRect(resetR.x, resetR.y, resetR.w, resetR.h);
-    ctx.fillStyle = "#fee2e2";
-    ctx.fillText("重置存档", resetR.x + resetR.w / 2, resetR.y + resetR.h / 2);
-
-    const startR = getDevStartRect();
-    ctx.fillStyle = "#1d4ed8";
-    ctx.fillRect(startR.x, startR.y, startR.w, startR.h);
-    ctx.fillStyle = "#fff";
-    ctx.fillText("以调试启动", startR.x + startR.w / 2, startR.y + startR.h / 2);
-  }
-
-  /** 绘制一行（标签 + 一组按钮，可选中态） */
-  function drawDevRow(ctx, label, labelX, labelY, items, rowY, isSelected, getLabel) {
-    ctx.fillStyle = "#cbd5e1";
-    ctx.font = "13px sans-serif";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText(label, labelX, labelY);
-
-    items.forEach((item, i) => {
-      const r = devRowRect(rowY, items.length, i);
-      const sel = isSelected(item);
-      ctx.fillStyle = sel ? "#1d4ed8" : "#1e293b";
-      ctx.fillRect(r.x, r.y, r.w, r.h);
-      ctx.strokeStyle = sel ? "#60a5fa" : "#334155";
       ctx.lineWidth = 1;
       ctx.strokeRect(r.x, r.y, r.w, r.h);
-      ctx.fillStyle = sel ? "#fff" : "#cbd5e1";
-      ctx.font = "bold 13px sans-serif";
+
+      // 名称 + 等级（粗体 14）
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "bold 14px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(`${t.name}  Lv.${lv}/${maxLvText}`, r.x + 10, r.y + 8);
+
+      // 描述（11）
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#94a3b8";
+      ctx.fillText(t.desc, r.x + 10, r.y + 28);
+
+      // 升级按钮（绿色 / 满级灰）
+      const btn = getTalentButtonRect(i, dx);
+      ctx.fillStyle = isMax ? "#334155" : "#15803d";
+      ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 12px sans-serif"; // 按钮字号 12
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(getLabel(item), r.x + r.w / 2, r.y + r.h / 2);
+      if (isMax) {
+        ctx.fillText("MAX", btn.x + btn.w / 2, btn.y + btn.h / 2);
+      } else {
+        ctx.fillText(`升级 ${t.cost(lv)}金`, btn.x + btn.w / 2, btn.y + btn.h / 2);
+      }
     });
   }
 
-  // ==========================================================================
-  //  触摸输入
-  // ==========================================================================
+  /** 地图卡左侧的色带缩略图：用该地图第一档主题色画背景 + 几粒远景颗粒 */
+  function drawMapSwatch(ctx, map, x, y, w, h) {
+    if (map.particle === "grassland") { drawGrasslandSwatch(ctx, x, y, w, h, map.themes[0]); return; }
+    const theme = (map.themes && map.themes[0]) || { bg: "#020617", star: "#1e293b" };
+    if (map.particle === "ocean") {
+      drawOceanSwatch(ctx, x, y, w, h, theme);
+      return;
+    }
+    ctx.fillStyle = theme.bg;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = theme.star;
+    for (let i = 0; i < 10; i += 1) {
+      const px = x + ((i * 23) % Math.max(1, w - 3));
+      const py = y + ((i * 37) % Math.max(1, h - 3));
+      if (map.particle === "sand") ctx.fillRect(px, py, 3, 1);
+      else ctx.fillRect(px, py, 2, 2);
+    }
+    ctx.strokeStyle = "#334155";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h);
+  }
+
+  function drawMapsPage(ctx, save, dx) {
+    const maps = getVisibleMaps(save);
+    maps.forEach((m, i) => {
+      const r = getMapRect(i, dx);
+      const selected = m.id === state.selectedMapId;
+      const unlocked = isMapUnlocked(save, m);
+
+      // 卡片背景（选中时描边用地图主色）
+      ctx.fillStyle = "#1e293b";
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+      ctx.strokeStyle = selected ? (m.accent || "#38bdf8") : "#334155";
+      ctx.lineWidth = selected ? 2 : 1;
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+
+      // 左侧色带缩略图
+      drawMapSwatch(ctx, m, r.x + 10, r.y + 10, 64, r.h - 20);
+
+      const textX = r.x + 86;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "bold 15px sans-serif";
+      ctx.fillText(m.name, textX, r.y + 12);
+
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#94a3b8";
+      ctx.fillText(unlocked ? m.desc : m.unlockHint, textX, r.y + 34);
+
+      // 右上角状态徽标：使用中 / 点击选择
+      const badgeW = 52;
+      const badgeH = 20;
+      const badgeX = r.x + r.w - badgeW - 10;
+      const badgeY = r.y + 10;
+      ctx.fillStyle = selected ? (m.accent || "#38bdf8") : "#334155";
+      ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+      ctx.fillStyle = selected ? "#0f172a" : "#cbd5e1";
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(!unlocked ? "未解锁" : selected ? "使用中" : "选择", badgeX + badgeW / 2, badgeY + badgeH / 2);
+    });
+
+    // 列表底部提示：还有未解锁地图时给个方向（不剧透具体条件之外的信息）
+    if (maps.length < MAPS.length) {
+      const r = getMapRect(maps.length, dx);
+      ctx.fillStyle = "#475569";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText("？？？  击败隐藏 Boss 可解锁新战场", r.x + 4, r.y + 8);
+    }
+  }
+
+  /** DEV 面板配色（集中在这里，改主题只动这一处） */
+  const DEV_C = {
+    scrim: "rgba(2, 6, 23, 0.82)",
+    panel: "#0b1020",
+    border: "#7c3aed",
+    title: "#a78bfa",
+    section: "#64748b",
+    label: "#cbd5e1",
+    btnBg: "#1e293b",
+    btnLine: "#334155",
+    btnText: "#94a3b8",
+    onBg: "#312e81",
+    onLine: "#a78bfa",
+    onText: "#e9d5ff",
+    coin: "#fbbf24",
+  };
+
+  function devDrawButton(ctx, r, label, on, textColor) {
+    ctx.fillStyle = on ? DEV_C.onBg : DEV_C.btnBg;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeStyle = on ? DEV_C.onLine : DEV_C.btnLine;
+    ctx.lineWidth = on ? 2 : 1;
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    ctx.fillStyle = textColor || (on ? DEV_C.onText : DEV_C.btnText);
+    ctx.font = "bold 12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
+  }
+
+  function drawDevPanel(ctx) {
+    const p = getDevPanelRect();
+    const body = getDevBodyRect();
+
+    ctx.fillStyle = DEV_C.scrim;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = DEV_C.panel;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.strokeStyle = DEV_C.border;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(p.x, p.y, p.w, p.h);
+
+    // ---------- 标题栏 ----------
+    ctx.fillStyle = DEV_C.title;
+    ctx.font = "bold 16px sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText("开发者控制台", p.x + DEV_PAD, p.y + DEV_HEADER_H / 2);
+    // 右侧摘要：一眼看出当前会以什么参数启动
+    const sm = [];
+    if (state.debug.godMode) sm.push("无敌");
+    if (state.debug.oneHitKill) sm.push("秒杀");
+    if (state.debug.gameSpeed10x) sm.push("10x");
+    Object.keys(state.debug.mechanics).forEach((k) => {
+      const v = state.debug.mechanics[k];
+      if (v && v !== "auto") sm.push(k + ":" + v);
+    });
+    ctx.fillStyle = sm.length > 0 ? DEV_C.onText : DEV_C.section;
+    ctx.font = "11px sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(
+      sm.length > 0 ? sm.join(" · ") : "无作弊",
+      p.x + p.w - DEV_PAD,
+      p.y + DEV_HEADER_H / 2,
+    );
+    ctx.strokeStyle = DEV_C.btnLine;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(p.x, body.y);
+    ctx.lineTo(p.x + p.w, body.y);
+    ctx.stroke();
+
+    // ---------- 面板体（裁剪 + 滚动） ----------
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(body.x, body.y, body.w, body.h);
+    ctx.clip();
+
+    const { items } = devLayout();
+    items.forEach((it) => {
+      // 超出可视区的直接跳过，省绘制
+      const topY = it.rect ? it.rect.y : it.y;
+      if (topY > body.y + body.h + 40 || topY < body.y - 60) {
+        if (it.kind !== "cardsNav") return;
+      }
+
+      if (it.kind === "section") {
+        ctx.fillStyle = DEV_C.section;
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(it.label, it.x, it.y);
+        return;
+      }
+      if (it.kind === "label") {
+        ctx.fillStyle = DEV_C.label;
+        ctx.font = "13px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(it.label, it.x, it.y);
+        return;
+      }
+      if (it.kind === "cardsNav") {
+        const pg = Math.max(0, Math.min(state.devUpgradePage, devUpgradePageCount() - 1));
+        devDrawButton(ctx, it.prev, "上一页", false);
+        devDrawButton(ctx, it.next, "下一页", false);
+        ctx.fillStyle = DEV_C.label;
+        ctx.font = "12px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`${pg + 1} / ${devUpgradePageCount()}`, it.centerX, it.centerY);
+        return;
+      }
+      if (it.kind === "card") {
+        const sel = it.row.selectedIds().indexOf(it.upgrade.id) >= 0;
+        const r = it.rect;
+        ctx.fillStyle = sel ? DEV_C.onBg : DEV_C.btnBg;
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.strokeStyle = sel ? DEV_C.onLine : DEV_C.btnLine;
+        ctx.lineWidth = sel ? 2 : 1;
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
+        // 左侧稀有度色条
+        ctx.fillStyle = RARITY_COLORS[it.upgrade.rarity] || "#64748b";
+        ctx.fillRect(r.x, r.y, 3, r.h);
+        ctx.fillStyle = sel ? DEV_C.onText : "#cbd5e1";
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        let nm = it.upgrade.name;
+        if (nm.length > 7) nm = nm.slice(0, 7);
+        ctx.fillText(nm, r.x + 8, r.y + r.h / 2);
+        return;
+      }
+      if (it.kind === "btn") {
+        const row = it.row;
+        if (row.type === "choice") {
+          devDrawButton(ctx, it.rect, it.cell.label, row.get() === it.cell.v);
+        } else if (row.type === "toggles") {
+          devDrawButton(ctx, it.rect, it.cell.label, row.get(it.cell.key));
+        } else {
+          devDrawButton(ctx, it.rect, it.cell.label, false, DEV_C.coin);
+        }
+      }
+    });
+    ctx.restore();
+
+    // 滚动条（内容超出时才画）
+    const maxS = devMaxScroll();
+    if (maxS > 0) {
+      const trackH = body.h - 12;
+      const knobH = Math.max(28, trackH * (body.h / (body.h + maxS)));
+      const t = state.devScrollY / maxS;
+      ctx.fillStyle = "rgba(148,163,184,0.25)";
+      ctx.fillRect(p.x + p.w - 5, body.y + 6, 3, trackH);
+      ctx.fillStyle = "rgba(167,139,250,0.8)";
+      ctx.fillRect(p.x + p.w - 5, body.y + 6 + (trackH - knobH) * t, 3, knobH);
+    }
+
+    // ---------- 底栏 ----------
+    ctx.strokeStyle = DEV_C.btnLine;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(p.x, body.y + body.h);
+    ctx.lineTo(p.x + p.w, body.y + body.h);
+    ctx.stroke();
+
+    const cancel = getDevCancelRect();
+    devDrawButton(ctx, cancel, "关闭", false);
+    const reset = getDevResetRect();
+    ctx.fillStyle = "#7f1d1d";
+    ctx.fillRect(reset.x, reset.y, reset.w, reset.h);
+    ctx.strokeStyle = "#fca5a5";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(reset.x, reset.y, reset.w, reset.h);
+    ctx.fillStyle = "#fee2e2";
+    ctx.font = "bold 12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("重置存档", reset.x + reset.w / 2, reset.y + reset.h / 2);
+    const start = getDevStartRect();
+    ctx.fillStyle = "#4c1d95";
+    ctx.fillRect(start.x, start.y, start.w, start.h);
+    ctx.strokeStyle = "#a78bfa";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(start.x, start.y, start.w, start.h);
+    ctx.fillStyle = "#ede9fe";
+    ctx.font = "bold 14px sans-serif";
+    ctx.fillText("以调试启动", start.x + start.w / 2, start.y + start.h / 2);
+  }
 
   function pointInRect(x, y, r) {
     return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
@@ -1267,14 +1597,15 @@ function createMenuScene(options) {
     }
 
     // DEV 面板优先级最高（打开时全屏拦截）
-    if (DEV_ENABLED && state.devOpen) {
+    if (devEnabled() && state.devOpen) {
       handleDevTouch(t);
       return;
     }
 
     // 主菜单右上角的 DEV 入口
-    if (DEV_ENABLED && pointInRect(t.x, t.y, getDevButtonRect())) {
+    if (devEnabled() && pointInRect(t.x, t.y, getDevButtonRect())) {
       state.devOpen = true;
+      state.devScrollY = 0;
       return;
     }
 
@@ -1283,8 +1614,8 @@ function createMenuScene(options) {
       return;
     }
 
-    // 天赋重置（重置全部天赋并按历史花费退款）
-    if (pointInRect(t.x, t.y, getTalentResetRect())) {
+    // 天赋重置（重置全部天赋并按历史花费退款）；地图页不响应
+    if (!isMapsPage() && pointInRect(t.x, t.y, getTalentResetRect())) {
       const save = storage.get();
       let refund = 0;
       let changed = false;
@@ -1333,13 +1664,16 @@ function createMenuScene(options) {
       return;
     }
 
-    const tvp = getTalentViewport();
+    const tvp = getPanelViewport();
     if (pointInRect(t.x, t.y, tvp)) {
       state.talentTouchActive = true;
       state.talentTouchLastY = t.y;
       state.talentTouchStartX = t.x;
       state.talentTouchStartY = t.y;
       state.talentTouchMoved = false;
+      state.panelAxis = null;
+      state.panelDragging = false;
+      state.panelSlideMs = 0; // 按下即打断进行中的翻页动画
       return;
     }
 
@@ -1347,10 +1681,11 @@ function createMenuScene(options) {
       const save = storage.get();
       const c = CHARACTERS[state.selectedIndex];
       if (!isUnlocked(save, c)) {
-        flash(c.unlockByCodeOnly ? `${c.name} 需要兑换码解锁` : `${c.name} 需要 ${c.unlockCost} 金币解锁`);
+        flash(characterUnlockHint(c));
         return;
       }
       storage.setSelectedCharacterId(c.id);
+      storage.setSelectedMapId(state.selectedMapId);
       onStart(c);
     }
   }
@@ -1363,8 +1698,8 @@ function createMenuScene(options) {
       state.selectedIndex = index;
       return;
     }
-    if (c.unlockByCodeOnly) {
-      flash(`${c.name} 需要兑换码解锁`);
+    if (c.unlockByCodeOnly || c.unlockByMap) {
+      flash(characterUnlockHint(c));
       return;
     }
     const cost = c.unlockCost || 0;
@@ -1379,174 +1714,110 @@ function createMenuScene(options) {
   }
 
   /** DEV 面板内部的点击命中：选项切换 + 三个底部按钮 */
+  /**
+   * DEV 面板点击。与绘制**共用 devLayout()**，所以按钮位置永远一致；
+   * 上一版是绘制和点击各自算一遍坐标，改一处忘一处就会点不中。
+   */
   function handleDevTouch(t) {
-    const ys = devRowYs();
-
-    // 行 1：起始等级
-    for (let i = 0; i < LEVEL_PRESETS.length; i += 1) {
-      const r = devRowRect(ys.level, LEVEL_PRESETS.length, i);
-      if (pointInRect(t.x, t.y, r)) {
-        state.debug.startLevel = LEVEL_PRESETS[i];
-        return;
-      }
-    }
-
-    // 行 2：起始阶段
-    for (let i = 0; i < WAVE_PRESETS.length; i += 1) {
-      const r = devRowRect(ys.wave, WAVE_PRESETS.length, i);
-      if (pointInRect(t.x, t.y, r)) {
-        state.debug.startWave = WAVE_PRESETS[i].v;
-        return;
-      }
-    }
-
-    // 行 3：Boss 形态
-    for (let i = 0; i < BOSS_VARIANT_PRESETS.length; i += 1) {
-      const r = devRowRect(ys.boss, BOSS_VARIANT_PRESETS.length, i);
-      if (!pointInRect(t.x, t.y, r)) continue;
-      state.debug.startBossVariant = BOSS_VARIANT_PRESETS[i].v;
-      return;
-    }
-
-    // 行 4：起手升级模式（无 / 随机×等级 / 自选词条）
-    for (let i = 0; i < UPGRADE_MODE_PRESETS.length; i += 1) {
-      const r = devRowRect(ys.mode, UPGRADE_MODE_PRESETS.length, i);
-      if (!pointInRect(t.x, t.y, r)) continue;
-      const nextMode = UPGRADE_MODE_PRESETS[i].mode;
-      if (state.debug.upgradeStartMode === "pickCards" && nextMode !== "pickCards") {
-        state.debug.pickUpgradeIds = [];
-      }
-      state.debug.upgradeStartMode = nextMode;
-      if (nextMode !== "pickCards" && state.devUpgradePickerTarget === "startPick") {
-        state.devUpgradePickerTarget = null;
-      }
-      if (nextMode === "pickCards") state.devUpgradePickerTarget = "startPick";
-      state.devUpgradePage = Math.max(
-        0,
-        Math.min(state.devUpgradePage, devUpgradePageCount() - 1)
-      );
-      return;
-    }
-
-    // 本局调试：三卡各自开关
-    for (let i = 0; i < 3; i += 1) {
-      const r = devRowRect(ys.god, 3, i);
-      if (!pointInRect(t.x, t.y, r)) continue;
-      if (i === 0) state.debug.godMode = !state.debug.godMode;
-      else if (i === 1) state.debug.oneHitKill = !state.debug.oneHitKill;
-      else state.debug.gameSpeed10x = !state.debug.gameSpeed10x;
-      return;
-    }
-
-    // 本局必出升级
-    for (let i = 0; i < FORCE_UPGRADE_ACTIONS.length; i += 1) {
-      const r = devRowRect(ys.force, FORCE_UPGRADE_ACTIONS.length, i);
-      if (!pointInRect(t.x, t.y, r)) continue;
-      const a = FORCE_UPGRADE_ACTIONS[i].a;
-      if (a === "off") {
-        state.debug.forceUpgradeIds = [];
-        if (state.devUpgradePickerTarget === "forcePick") {
-          state.devUpgradePickerTarget = state.debug.upgradeStartMode === "pickCards" ? "startPick" : null;
-        }
-      } else if (a === "pick") {
-        state.devUpgradePickerTarget = "forcePick";
-      }
-      return;
-    }
-
-    // 金币预设（直接改存档）；先于分页导航与自选卡片区判定
-    const coinPresets = [1000, 10000];
-    for (let i = 0; i < coinPresets.length; i += 1) {
-      const r = devRowRect(ys.coins, 2, i);
-      if (pointInRect(t.x, t.y, r)) {
-        storage.addCoins(coinPresets[i]);
-        flash(`+${coinPresets[i]} 金币`);
-        return;
-      }
-    }
-
-    // 自选词条分页 + 卡片多选
-    if (ys.showCards) {
-      const nav = getDevUpgradeNavRects();
-      if (pointInRect(t.x, t.y, nav.prev)) {
-        state.devUpgradePage = Math.max(0, state.devUpgradePage - 1);
-        return;
-      }
-      if (pointInRect(t.x, t.y, nav.next)) {
-        state.devUpgradePage = Math.min(devUpgradePageCount() - 1, state.devUpgradePage + 1);
-        return;
-      }
-      const pg = Math.max(0, Math.min(state.devUpgradePage, devUpgradePageCount() - 1));
-      state.devUpgradePage = pg;
-      const startIdx = pg * UPGRADE_PICK_PAGE_SIZE;
-      for (let s = 0; s < UPGRADE_PICK_PAGE_SIZE; s += 1) {
-        const ui = UPGRADE_POOL[startIdx + s];
-        if (!ui) break;
-        const r = getDevUpgradeCardRect(s);
-        if (!pointInRect(t.x, t.y, r)) continue;
-        if (ys.forcePick) {
-          const ids = state.debug.forceUpgradeIds;
-          const ix = ids.indexOf(ui.id);
-          if (ix >= 0) ids.splice(ix, 1);
-          else ids.push(ui.id);
-        } else {
-          const ids = state.debug.pickUpgradeIds;
-          const ix = ids.indexOf(ui.id);
-          if (ix >= 0) ids.splice(ix, 1);
-          else ids.push(ui.id);
-        }
-        return;
-      }
-    }
-
-    // 取消
+    // 底栏优先（不受滚动影响）
     if (pointInRect(t.x, t.y, getDevCancelRect())) {
       state.devOpen = false;
       return;
     }
-
-    // 重置存档
     if (pointInRect(t.x, t.y, getDevResetRect())) {
       storage.reset();
+      state.selectedIndex = 0;
+      state.selectedMapId = resolveSelectedMap(storage.get()).id;
       flash("存档已重置");
       return;
     }
-
-    /** 拼装当前 DEV 调试参数对象 */
-    function devDebugPayload(extra) {
-      return Object.assign(
-        {
-          startLevel: state.debug.startLevel,
-          startWave: state.debug.startWave,
-          startBossVariant: state.debug.startBossVariant,
-          forceUpgradeIds: state.debug.forceUpgradeIds.slice(),
-          upgradeStartMode: state.debug.upgradeStartMode,
-          pickUpgradeIds: state.debug.pickUpgradeIds.slice(),
-          godMode: !!state.debug.godMode,
-          oneHitKill: !!state.debug.oneHitKill,
-          gameSpeed10x: !!state.debug.gameSpeed10x,
-        },
-        extra || {},
-      );
-    }
-
-    // 以调试参数启动
     if (pointInRect(t.x, t.y, getDevStartRect())) {
       const save = storage.get();
       const c = CHARACTERS[state.selectedIndex];
       if (!isUnlocked(save, c)) {
-        flash(c.unlockByCodeOnly ? `${c.name} 需要兑换码解锁` : `${c.name} 需要 ${c.unlockCost} 金币解锁`);
+        flash(characterUnlockHint(c));
         return;
       }
       storage.setSelectedCharacterId(c.id);
+      storage.setSelectedMapId(state.selectedMapId);
       state.devOpen = false;
       onStart(c, devDebugPayload());
+      return;
     }
+
+    // 面板体：先记下拖拽起点（滚动在 onTouchMove 里处理），点击在 onTouchEnd 判定
+    const body = getDevBodyRect();
+    if (pointInRect(t.x, t.y, body)) {
+      state.devScrollActive = true;
+      state.devScrollLastY = t.y;
+      state.devScrollMoved = false;
+      return;
+    }
+  }
+
+  /** 面板体里的一次「点击」（拖拽结束且没怎么移动才算） */
+  function handleDevBodyTap(x, y) {
+    const body = getDevBodyRect();
+    if (!pointInRect(x, y, body)) return;
+    const { items } = devLayout();
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i];
+      if (it.kind === "btn" && pointInRect(x, y, it.rect)) {
+        const row = it.row;
+        if (row.type === "choice") row.set(it.cell.v);
+        else if (row.type === "toggles") row.set(it.cell.key);
+        else it.cell.run();
+        clampDevScroll();
+        return;
+      }
+      if (it.kind === "card" && pointInRect(x, y, it.rect)) {
+        it.row.toggle(it.upgrade.id);
+        return;
+      }
+      if (it.kind === "cardsNav") {
+        if (pointInRect(x, y, it.prev)) {
+          state.devUpgradePage = Math.max(0, state.devUpgradePage - 1);
+          return;
+        }
+        if (pointInRect(x, y, it.next)) {
+          state.devUpgradePage = Math.min(devUpgradePageCount() - 1, state.devUpgradePage + 1);
+          return;
+        }
+      }
+    }
+  }
+
+  function devDebugPayload(extra) {
+    return Object.assign(
+      {
+        startLevel: state.debug.startLevel,
+        startWave: state.debug.startWave,
+        startBossVariant: state.debug.startBossVariant,
+        forceUpgradeIds: state.debug.forceUpgradeIds.slice(),
+        upgradeStartMode: state.debug.upgradeStartMode,
+        pickUpgradeIds: state.debug.pickUpgradeIds.slice(),
+        godMode: !!state.debug.godMode,
+        oneHitKill: !!state.debug.oneHitKill,
+        gameSpeed10x: !!state.debug.gameSpeed10x,
+        mechanics: Object.assign({}, state.debug.mechanics),
+      },
+      extra || {},
+    );
   }
 
   function onTouchMove(t) {
     state.touchLastX = t.x;
     state.touchLastY = t.y;
+
+    // DEV 面板体：拖拽滚动。放在最前面，打开时独占拖拽
+    if (devEnabled() && state.devOpen && state.devScrollActive) {
+      const dy = t.y - state.devScrollLastY;
+      state.devScrollLastY = t.y;
+      if (Math.abs(dy) >= 1) state.devScrollMoved = true;
+      state.devScrollY -= dy;
+      clampDevScroll();
+      return;
+    }
 
     if (state.settingsOpen) {
       if (state.settingsDraggingVolume) {
@@ -1556,13 +1827,33 @@ function createMenuScene(options) {
     }
 
     if (state.talentTouchActive) {
-      const dy = t.y - state.talentTouchLastY;
+      const dxTotal = t.x - state.talentTouchStartX;
+      const dyTotal = t.y - state.talentTouchStartY;
+      const dyStep = t.y - state.talentTouchLastY;
       state.talentTouchLastY = t.y;
-      const dragDist = Math.abs(t.x - state.talentTouchStartX)
-        + Math.abs(t.y - state.talentTouchStartY);
-      if (dragDist >= 10) state.talentTouchMoved = true;
-      state.talentsScrollY -= dy;
-      clampTalentsScroll();
+      if (Math.abs(dxTotal) + Math.abs(dyTotal) >= 10) state.talentTouchMoved = true;
+
+      // 首次明显位移时锁定方向：横向=翻页，纵向=滚动；本次拖拽内不再改判
+      if (!state.panelAxis) {
+        if (Math.abs(dxTotal) >= 12 && Math.abs(dxTotal) > Math.abs(dyTotal)) {
+          state.panelAxis = "x";
+          state.panelDragging = true;
+        } else if (Math.abs(dyTotal) >= 8) {
+          state.panelAxis = "y";
+        }
+      }
+
+      if (state.panelAxis === "x") {
+        state.panelSlideX = dxTotal;
+      } else if (state.panelAxis === "y") {
+        if (isMapsPage()) {
+          state.mapsScrollY -= dyStep;
+          clampMapsScroll();
+        } else {
+          state.talentsScrollY -= dyStep;
+          clampTalentsScroll();
+        }
+      }
       return;
     }
 
@@ -1576,33 +1867,71 @@ function createMenuScene(options) {
       normalizeCharScroll();
     }
   }
+  /** 天赋页：点击某条的升级按钮 */
+  function handleTalentTap(x, y) {
+    const save = storage.get();
+    for (let idx = 0; idx < TALENTS.length; idx += 1) {
+      const btn = getTalentButtonRect(idx);
+      if (!pointInRect(x, y, btn)) continue;
+      const talent = TALENTS[idx];
+      const lv = save.talents[talent.id] || 0;
+      if (lv >= talent.maxLevel) {
+        flash("已达上限");
+        return;
+      }
+      const cost = talent.cost(lv);
+      if (save.coins < cost) {
+        flash(`金币不足 ${cost}`);
+        return;
+      }
+      storage.spendCoins(cost);
+      storage.setTalent(talent.id, lv + 1);
+      flash(`${talent.name} 升至 Lv.${lv + 1}`);
+      return;
+    }
+  }
+
+  /** 地图页：点击卡片切换本局战场（列表里只有已解锁地图，点了即可用） */
+  function handleMapTap(x, y) {
+    const maps = getVisibleMaps(storage.get());
+    for (let i = 0; i < maps.length; i += 1) {
+      if (!pointInRect(x, y, getMapRect(i))) continue;
+      const m = maps[i];
+      if (!isMapUnlocked(storage.get(), m)) { flash(m.unlockHint); return; }
+      if (m.id === state.selectedMapId) return;
+      state.selectedMapId = m.id;
+      storage.setSelectedMapId(m.id);
+      flash(`战场已切换：${m.name}`);
+      return;
+    }
+  }
+
   function onTouchEnd() {
     state.settingsDraggingVolume = false;
+
+    // DEV 面板体：没怎么移动就算一次点击（避免滚动时误触按钮）
+    if (state.devScrollActive) {
+      if (!state.devScrollMoved) handleDevBodyTap(state.touchLastX, state.touchLastY);
+      state.devScrollActive = false;
+      state.devScrollMoved = false;
+      return;
+    }
     if (state.talentTouchActive) {
-      if (!state.talentTouchMoved) {
-        const save = storage.get();
-        for (let idx = 0; idx < TALENTS.length; idx += 1) {
-          const btn = getTalentButtonRect(idx);
-          if (!pointInRect(state.touchLastX, state.touchLastY, btn)) continue;
-          const talent = TALENTS[idx];
-          const lv = save.talents[talent.id] || 0;
-          if (lv >= talent.maxLevel) {
-            flash("已达上限");
-            break;
-          }
-          const cost = talent.cost(lv);
-          if (save.coins < cost) {
-            flash(`金币不足 ${cost}`);
-            break;
-          }
-          storage.spendCoins(cost);
-          storage.setTalent(talent.id, lv + 1);
-          flash(`${talent.name} 升至 Lv.${lv + 1}`);
-          break;
+      if (state.panelAxis === "x") {
+        // 横向拖拽收手：超过阈值翻到另一页，否则回弹
+        if (Math.abs(state.panelSlideX) >= W * PANEL_SWIPE_RATIO) {
+          goPanelPage(otherPanelPage());
+        } else {
+          goPanelPage(state.panelPage);
         }
+      } else if (!state.talentTouchMoved) {
+        if (isMapsPage()) handleMapTap(state.touchLastX, state.touchLastY);
+        else handleTalentTap(state.touchLastX, state.touchLastY);
       }
       state.talentTouchActive = false;
       state.talentTouchMoved = false;
+      state.panelAxis = null;
+      state.panelDragging = false;
     }
 
     if (state.charTouchActive && !state.charTouchMoved && state.charTouchCandidateIndex >= 0) {

@@ -16,7 +16,12 @@
   "compileType": "game",
   "simulatorPluginLibVersion": {},
   "packOptions": {
-    "ignore": [],
+    "ignore": [
+      { "type": "folder", "value": "tools" },
+      { "type": "folder", "value": "tests" },
+      { "type": "folder", "value": "docs" },
+      { "type": "file", "value": "PRODUCT.md" }
+    ],
     "include": []
   },
   "isGameTourist": false,

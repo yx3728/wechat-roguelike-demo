@@ -143,6 +143,40 @@ const CHARACTERS = [
       bulletPierceEnemies: false,
     },
   },
+  {
+    id: "windrunner",
+    name: "逐风者",
+    desc: "移动蓄风，下一轮主炮强化\n伤害 ×1.8，并穿透敌人",
+    unlockCost: 0,
+    unlockByMap: "grassland",
+    unlockHint: "通关草原后解锁",
+    color: "#bce9cc",
+    base: {
+      maxHp: 2600,
+      bulletDamage: 880,
+      shootInterval: 400,
+      sideBullets: 0,
+      bulletPierceEnemies: false,
+    },
+  },
+  {
+    id: "tidecaller",
+    name: "潮汐使",
+    desc: "自带生命值 20% 的护盾\n每 4 轮主炮追加双追踪潮弹",
+    unlockCost: 0,
+    unlockByMap: "ocean",
+    unlockHint: "通关海洋后解锁",
+    color: "#89e4e7",
+    base: { maxHp: 2800, bulletDamage: 840, shootInterval: 420, sideBullets: 0, bulletPierceEnemies: false },
+  },
 ];
 
-module.exports = { CHARACTERS };
+function isCharacterUnlocked(save, character) {
+  if (!character) return false;
+  if (character.unlockByCodeOnly || character.unlockByMap || character.unlockCost > 0) {
+    return !!(save && save.unlockedCharacters && save.unlockedCharacters[character.id]);
+  }
+  return true;
+}
+
+module.exports = { CHARACTERS, isCharacterUnlocked };

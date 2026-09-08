@@ -11,18 +11,38 @@
  *
  * 抽取概率由 RARITY_WEIGHTS 决定，按词条稀有度参与加权随机。
  *
- * 每个词条都是一次性（同一局内只能拿一次）。
+ * 词条默认一次性（同一局内只能拿一次）。少数标了 repeatable 的可以反复刷到、反复选：
+ *   - 应急修复（heal_quick）    始终可选
+ *   - 高级重掷（reroll_premium）仅在池中还有紫/橙可抽时出现
+ * 可重复词条不写入 picked，也不受「剔除」与永雏塔菲重掷的自动剔除影响。
+ * 当**不可重复**的词条全部拿完后，升级不再弹面板，改为每级自动补给（见 battle.js grantAutoLevelReward）。
  *
  * 涉及到的 state 字段（在 battle.js 顶部初始化默认值）：
  *   shootInterval, bulletDamage, sideBullets, bulletPierceEnemies,
  *   maxHp, hp, magnetRange, hasRegen, regenIntervalMs,
  *   expMul, dropBase, dropLevelUpChance, coinsEarned,
- *   critRate, critMult, vampRate, bulletSizeMul, bulletSpeedMul,
+ *   levelUpSupply / levelUpSupplyTimer（空投信标：本局剩余时间内定期空投 LV+ 升级包）,
+ *   critRate, critMult, critOverflowRate（溢出暴击累计，结算见 effectiveCritMult）,
+ *   vampRate, bulletSizeMul, bulletSpeedMul,
  *   killHealChance, killCoinBonus, expOrbValueMul,
  *   shieldMaxHp, shieldHp, shieldDamageMul, shieldRegenPerSec,
  *   bossDmgMul, eliteDmgMul, thornReflectRate, onHitBombChance, onKillBombChance, onKillBombItemChance,
  *   overhealToShield, overhealToMaxHp, overhealToExp, magnetForceMul,
  *   timeflowShield（拾取半径内敌方位移减速）, turncoatShield / turncoatShieldAccMs（反间护盾）,
+ *   ---- 沙漠专属（entry 的 options.maps 限定，见 maps.js）----
+ *   stormFireRateMul（沙暴期射速倍率）, stormClearSight（沙暴期敌人不再随距离淡化）,
+ *   heatDeathPerTenth（敌人每快 10% 移速的增伤）, quicksandBind（拾取范围内额外减速）,
+ *   stormEyeRegenRatio（沙暴期每秒回血比例）, stormDurationMul（沙暴持续倍率）,
+ *   stormDamageMul（沙暴期全伤害倍率）, stormCoinMul（沙暴期金币倍率）,
+ *   erosionPerStack / erosionMaxStacks（风蚀：命中叠易伤层）,
+ *   ---- 海洋专属（默认字段由 mechanics.js 的 tide 提供）----
+ *   tideFireRateMul / tideExpMul（涨潮射速 / 拾取经验倍率）,
+ *   tideDriftMul（海流推力倍率）, tideEndHealRatio（退潮回复最大生命比例）,
+ *   tideDamageMul / tideEnemyBulletSpeedMul（涨潮全伤害 / 敌弹速度倍率）,
+ *   tideHeart / tideHeartShieldRatio（涨潮清弹 / 护盾补充比例）,
+ *   ---- 草原专属（默认字段由 grasslandMechanics.js 提供）----
+ *   grassCoverCapacityBonus / grassCoverRegenMul（草丛耐久与恢复时间）,
+ *   grassAmbushDamageMul / grassBudHealRatio / grassCoverBreakShieldRatio / grassSnareImmune,
  *   upgradeNextPanelPurplePlus（拾取「高级重掷」后，仅下一次三选一的首次抽卡必含紫/橙；同面板内重掷或剔除后不再保底）.
  * ----------------------------------------------------------------------------
  */
@@ -94,37 +114,86 @@ function applyFireRateMul(s, mul) {
   s.shootInterval = Math.max(getShootIntervalFloor(s), Math.floor(s.shootInterval / mul));
 }
 
+/** 溢出暴击换算爆伤的比率：每溢出 1% 暴击 => +1.5% 暴伤（加算，不参与 critMult 的连乘） */
+const CRIT_OVERFLOW_TO_MULT = 1.5;
+
 function addCritRateWithOverflow(s, addRate) {
   const cap = 0.95;
   const prev = Math.max(0, s.critRate || 0);
   const next = prev + Math.max(0, addRate || 0);
   const overflow = Math.max(0, next - cap);
   s.critRate = Math.min(cap, next);
-  // 溢出暴击转爆伤：每溢出 1% 暴击 => +2% 暴伤倍率
-  if (overflow > 0) s.critMult += overflow * 2;
+  // 只累计溢出量，换算放到 effectiveCritMult 里统一结算。
+  // 若在这里直接 critMult += ...，后续词条的 critMult *= N 会把这部分一起放大，
+  // 导致同一组词条换个拾取顺序结果就不同（旧实现满构筑爆伤会在 4.80 ~ 5.87 之间漂）。
+  if (overflow > 0) s.critOverflowRate = (s.critOverflowRate || 0) + overflow;
 }
 
-function entry(rarity, id, name, desc, fn, prereq) {
+/** 结算用的实际爆伤倍率：连乘所得的 critMult + 溢出暴击换算出的加算部分 */
+function effectiveCritMult(s) {
+  const raw = Number(s && s.critMult);
+  const base = Number.isFinite(raw) ? raw : 1;
+  const overflow = Math.max(0, Number(s && s.critOverflowRate) || 0);
+  return base + overflow * CRIT_OVERFLOW_TO_MULT;
+}
+
+/**
+ * @param options.repeatable  true = 可反复刷到并反复选择（不写入 picked，也不受剔除影响）
+ * @param options.availableIf 额外可用条件；返回 false 时不进候选池
+ */
+/**
+ * @param options.repeatable  可重复拾取（不记 picked、不吃 blocked）
+ * @param options.availableIf 额外的可用条件
+ * @param options.maps        限定地图 id 数组；**不填 = 全地图通用**。
+ *                            填了之后只在 state.mapId 命中时才进候选池，
+ *                            用来做地图专属词条（见沙漠那一组）。
+ */
+function entry(rarity, id, name, desc, fn, prereq, options) {
+  const opts = options || {};
+  const repeatable = !!opts.repeatable;
+  const maps = Array.isArray(opts.maps) && opts.maps.length > 0 ? opts.maps : null;
   return {
     rarity,
     id,
     name,
     desc,
-    apply(s) { fn(s); markPicked(s, id); },
-    available(s) { return !isPicked(s, id) && !isBlocked(s, id) && hasPrereq(s, prereq); },
+    repeatable,
+    maps,
+    apply(s) { fn(s); if (!repeatable) markPicked(s, id); },
+    available(s) {
+      // 可重复词条既不记 picked 也不吃 blocked，否则"反复刷到"会被一次剔除/塔菲重掷废掉
+      if (!repeatable && (isPicked(s, id) || isBlocked(s, id))) return false;
+      // 地图专属：只在对应地图出现
+      if (maps && maps.indexOf(s && s.mapId) < 0) return false;
+      if (!hasPrereq(s, prereq)) return false;
+      if (opts.availableIf && !opts.availableIf(s)) return false;
+      return true;
+    },
   };
+}
+
+/** 池中是否还有可抽的紫/橙词条（「高级重掷」的存在意义） */
+function hasPurplePlusAvailable(s) {
+  for (let i = 0; i < UPGRADE_POOL.length; i += 1) {
+    const u = UPGRADE_POOL[i];
+    if (u.rarity !== "purple" && u.rarity !== "orange") continue;
+    if (u.available(s)) return true;
+  }
+  return false;
 }
 
 const UPGRADE_POOL = [
   // ---------- 射速类 ----------
   entry("blue", "reroll_premium", "高级重掷", "下一次三选一中必含紫或橙色词条",
-    (s) => { s.upgradeNextPanelPurplePlus = true; }),
-  entry("green",  "fr_basic",       "急速射击",     "射速 +32%，子弹尺寸缩小10%",
-    (s) => { applyFireRateMul(s, 1.32); s.bulletSizeMul *= 0.9; }),
-  entry("green",  "fr_cool",        "急速射击II",   "射速 +64%，子弹尺寸再缩小10%",
-    (s) => { applyFireRateMul(s, 1.64); s.bulletSizeMul *= 0.81; }, "fr_basic"),
-  entry("blue",   "fr_turbo",       "急速射击III",  "射速 +128%，子弹尺寸再缩小10%",
-    (s) => { applyFireRateMul(s, 1.28); s.bulletSizeMul *= 0.729; }, "fr_cool"),
+    (s) => { s.upgradeNextPanelPurplePlus = true; }, null,
+    { repeatable: true, availableIf: hasPurplePlusAvailable }),
+  entry("green",  "fr_basic",       "急速射击",     "射速 +25%，子弹尺寸缩小10%",
+    (s) => { applyFireRateMul(s, 1.25); s.bulletSizeMul *= 0.9; }),
+  entry("green",  "fr_cool",        "急速射击II",   "射速 +50%，子弹尺寸再缩小19%",
+    (s) => { applyFireRateMul(s, 1.5); s.bulletSizeMul *= 0.81; }, "fr_basic"),
+  // 三条拿满：1.25 × 1.5 × 1.6 = 初始射速的 3 倍
+  entry("blue",   "fr_turbo",       "急速射击III",  "射速 +60%，子弹尺寸再缩小27%",
+    (s) => { applyFireRateMul(s, 1.6); s.bulletSizeMul *= 0.729; }, "fr_cool"),
   // entry("purple", "fr_overload",    "急速射击IV",   "射速 +17%",
   //   (s) => { s.shootInterval = Math.max(80, Math.floor(s.shootInterval / 1.17)); }, "fr_turbo"),
   // entry("orange", "fr_chronoBoost", "急速射击V",    "射速 +24%",
@@ -169,8 +238,8 @@ const UPGRADE_POOL = [
     (s) => { s.bulletDamage *= 1.2; }, "dmg_s"),
   entry("purple", "dmg_l",  "高能弹芯III",  "伤害 +50%",
     (s) => { s.bulletDamage *= 1.5; }, "dmg_m"),
-  entry("orange", "dmg_xl", "高能弹芯IV",   "伤害 +100%",
-    (s) => { s.bulletDamage *= 2; }, "dmg_l"),
+  entry("orange", "dmg_xl", "高能弹芯IV",   "伤害 +75%",
+    (s) => { s.bulletDamage *= 1.75; }, "dmg_l"),
 
   // ---------- 暴击类 ----------
   entry("green",  "crit_aim",  "瞄准训练",     "暴击率 +20%",
@@ -179,8 +248,8 @@ const UPGRADE_POOL = [
     (s) => { addCritRateWithOverflow(s, 0.25); }, "crit_aim"),
   entry("purple", "crit_master", "瞄准训练III","暴击率 +30%，暴击伤害 +50%",
     (s) => { addCritRateWithOverflow(s, 0.30); s.critMult *= 1.5; }, "crit_lethal"),
-  entry("orange", "crit_apex",   "瞄准训练IV", "暴击率 +35%，暴击伤害 +100%",
-    (s) => { addCritRateWithOverflow(s, 0.35); s.critMult *= 2; }, "crit_master"),
+  entry("orange", "crit_apex",   "瞄准训练IV", "暴击率 +35%，暴击伤害 +70%",
+    (s) => { addCritRateWithOverflow(s, 0.35); s.critMult *= 1.7; }, "crit_master"),
 
   // ---------- 对 Boss/精英 ----------
   entry("blue",   "boss_hunter",   "屠龙战术",   "对 Boss 伤害 +30%",
@@ -193,19 +262,19 @@ const UPGRADE_POOL = [
     (s) => { s.eliteDmgMul *= 2; s.bossDmgMul *= 2; }),
 
   // ---------- 生存类 ----------
-  entry("green",  "hp_plate",     "装甲板",     "最大HP +20%，并回复全部生命",
+  entry("green",  "hp_plate",     "装甲板",     "最大HP +15%，并回复全部生命",
+    (s) => {
+      s.maxHp *= 1.15;
+      s.pendingUpgradeHeal = (s.pendingUpgradeHeal || 0) + s.maxHp;
+    }),
+  entry("blue",   "hp_heavy",     "装甲板II",   "最大HP再+20%，并回复全部生命",
     (s) => {
       s.maxHp *= 1.2;
       s.pendingUpgradeHeal = (s.pendingUpgradeHeal || 0) + s.maxHp;
-    }, "hp_heavy"),
-  entry("blue",   "hp_heavy",     "装甲板II",   "最大HP再+30%，并回复全部生命",
+    }, "hp_plate"),
+  entry("purple", "hp_unbroken",  "装甲板III",  "最大HP +25%，并回复全部生命",
     (s) => {
-      s.maxHp *= 1.3;
-      s.pendingUpgradeHeal = (s.pendingUpgradeHeal || 0) + s.maxHp;
-    }, "hp_heavy"),
-  entry("purple", "hp_unbroken",  "装甲板III",  "最大HP +40%，并回复全部生命",
-    (s) => {
-      s.maxHp *= 1.4;
+      s.maxHp *= 1.25;
       s.pendingUpgradeHeal = (s.pendingUpgradeHeal || 0) + s.maxHp;
     }, "hp_heavy"),
   entry("green",  "heal_quick",   "应急修复",   "立即回满生命，并获得一个等同最大生命值的护盾",
@@ -213,7 +282,7 @@ const UPGRADE_POOL = [
       s.pendingUpgradeHeal = (s.pendingUpgradeHeal || 0) + s.maxHp;
       s.shieldMaxHp = Math.max(s.shieldMaxHp || 0, s.maxHp);
       s.shieldHp = Math.max(s.shieldHp || 0, s.maxHp);
-    }),
+    }, null, { repeatable: true }),
   // entry("blue",   "heal_full",    "应急修复II", "立即回满生命，并获得一个等同最大生命值的护盾",
   //   (s) => { s.pendingUpgradeHeal = (s.pendingUpgradeHeal || 0) + s.maxHp; }, "heal_quick"),
   entry("blue",   "regen_basic",  "自动修复",   "每秒回复 1% 基础生命值",
@@ -230,26 +299,26 @@ const UPGRADE_POOL = [
     }, "regen_basic"),
 
   // ---------- 护盾类 ----------
-  entry("blue",   "shield_basic",  "能量护盾", "获得等同最大生命值的护盾，且每秒自动修复 3%",
+  entry("blue",   "shield_basic",  "能量护盾", "获得等同最大生命值的护盾，且每秒自动修复 1.5%",
     (s) => {
-      s.shieldMaxHp = s.maxHp;
-      s.shieldHp = s.maxHp;
+      s.shieldMaxHp = Math.max(s.shieldMaxHp || 0, s.maxHp);
+      s.shieldHp = Math.max(s.shieldHp || 0, s.maxHp);
       s.shieldDamageMul = 2; // 护盾承受双倍伤害，避免“拿盾后几乎不掉血”
-      s.shieldRegenPerSec = Math.max(s.shieldRegenPerSec || 0, 0.03);
+      s.shieldRegenPerSec = Math.max(s.shieldRegenPerSec || 0, 0.015);
     }),
-  entry("purple", "shield_extra",  "能量护盾II",   "获得等同最大生命值的护盾，且每秒自动修复 6%",
+  entry("purple", "shield_extra",  "能量护盾II",   "获得等同最大生命值的护盾，且每秒自动修复 3%",
     (s) => {
-      s.shieldMaxHp = s.maxHp;
-      s.shieldHp = s.maxHp;
+      s.shieldMaxHp = Math.max(s.shieldMaxHp || 0, s.maxHp);
+      s.shieldHp = Math.max(s.shieldHp || 0, s.maxHp);
       s.shieldDamageMul = 2;
-      s.shieldRegenPerSec = Math.max(s.shieldRegenPerSec || 0, 0.06);
+      s.shieldRegenPerSec = Math.max(s.shieldRegenPerSec || 0, 0.03);
     }, "shield_basic"),
-  entry("orange", "shield_rapid",  "能量护盾III",  "获得等同最大生命值的护盾，且每秒自动修复 15%",
+  entry("orange", "shield_rapid",  "能量护盾III",  "获得等同最大生命值的护盾，且每秒自动修复 7.5%",
     (s) => {
-      s.shieldMaxHp = s.maxHp;
-      s.shieldHp = s.maxHp;
+      s.shieldMaxHp = Math.max(s.shieldMaxHp || 0, s.maxHp);
+      s.shieldHp = Math.max(s.shieldHp || 0, s.maxHp);
       s.shieldDamageMul = 2;
-      s.shieldRegenPerSec = Math.max(s.shieldRegenPerSec || 0, 0.15);
+      s.shieldRegenPerSec = Math.max(s.shieldRegenPerSec || 0, 0.075);
     }, "shield_extra"),
   entry("purple", "timeflow_shield", "时间流护盾", "靠近你的敌人与子弹将被减速50%\n范围等于你的拾取范围",
     (s) => { s.timeflowShield = true; }),
@@ -274,8 +343,8 @@ const UPGRADE_POOL = [
     (s) => { s.magnetRange += 9999; }, "mag_well"),
   entry("green",  "exp_basic",  "战术学习",     "经验倍率 +100%",
     (s) => { s.expMul += 1; }),
-  entry("green",   "exp_smart",  "战术学习II",   "经验倍率 +200%",
-    (s) => { s.expMul += 2; }, "exp_basic"),
+  entry("blue",   "exp_smart",  "战术学习II",   "经验倍率 +150%",
+    (s) => { s.expMul += 1.5; }, "exp_basic"),
   entry("purple", "exp_quantum", "战术学习III", "敌人阵亡时有 5% 概率掉落一枚升级道具（LV+）",
     (s) => { s.dropLevelUpChance = Math.min(1, (s.dropLevelUpChance || 0) + 0.05); }, "exp_smart"),
   // entry("blue",   "exp_orb",    "经验催化",     "经验球价值 +100%",
@@ -284,6 +353,11 @@ const UPGRADE_POOL = [
   //   (s) => { s.expOrbValueMul += 2; }, "exp_orb"),
   entry("blue",   "drop_basic", "战利品雷达",   "精英敌人必定掉落道具",
     (s) => { s.eliteGuaranteedDrop = true; }),
+  entry("purple", "supply_beacon", "空投信标", "本局对战的剩余时间内，战场会不定期空投升级包（LV+）",
+    (s) => {
+      s.levelUpSupply = true;
+      s.levelUpSupplyTimer = 0;
+    }),
   entry("green",  "coin_small", "赏金协议",     "立即获得 150 金币",
     (s) => { grantRunCoins(s, 150); }),
   entry("blue", "coin_big",   "赏金协议II",   "立即获得 400 金币",
@@ -306,6 +380,124 @@ const UPGRADE_POOL = [
     (s) => { s.overhealToMaxHp = true; }, "heal_overflow"),
   entry("purple", "heal_overflow_3", "超量血库III", "你的过量治疗还将增加经验值",
     (s) => { s.overhealToExp = true; }, "heal_overflow_2"),
+
+  // ---------- 沙漠专属（options.maps 限定，只在沙漠地图出现） ----------
+  // 六条全部围绕沙暴：要么对抗它（沙镜 / 沙暴之眼），要么押注它（逆风者 / 热寂 / 旱魃之息）。
+  // 注意：视野受限的实现是"远处敌人随距离淡化"（不是暗幕挖洞），所以相关词条改的是淡化本身。
+  entry("green", "dust_headwind", "逆风者", "沙暴期间射速 +40%",
+    (s) => { s.stormFireRateMul = Math.max(s.stormFireRateMul || 1, 1.4); },
+    null, { maps: ["desert"] }),
+
+  entry("green", "dust_scavenger", "拾荒者", "沙暴期间拾取的金币 +200%",
+    (s) => { s.stormCoinMul = Math.max(s.stormCoinMul || 1, 3); },
+    null, { maps: ["desert"] }),
+
+  entry("blue", "dust_mirage", "沙镜", "沙暴期间敌人不再随距离在风沙里淡化",
+    (s) => { s.stormClearSight = true; },
+    null, { maps: ["desert"] }),
+
+  entry("blue", "dust_erosion", "风蚀", "命中使目标受到的伤害 +12%\n可叠 3 层，持续 4 秒",
+    (s) => {
+      s.erosionPerStack = Math.max(s.erosionPerStack || 0, 0.12);
+      s.erosionMaxStacks = Math.max(s.erosionMaxStacks || 0, 3);
+    },
+    null, { maps: ["desert"] }),
+
+  entry("purple", "dust_heatdeath", "热寂", "敌人移速每高 10%，你对其伤害 +8%\n（沙暴期敌人加速 50%，即全体 +40%）",
+    (s) => { s.heatDeathPerTenth = (s.heatDeathPerTenth || 0) + 0.08; },
+    null, { maps: ["desert"] }),
+
+  entry("purple", "dust_quickbind", "流沙缚", "你的拾取范围内，敌人额外减速 30%\n与时间流护盾叠乘",
+    (s) => { s.quicksandBind = true; },
+    null, { maps: ["desert"] }),
+
+  entry("orange", "dust_stormeye", "沙暴之眼", "沙暴期间视野完全不受影响\n且每秒回复 2% 最大生命",
+    (s) => {
+      s.stormClearSight = true;
+      s.stormEyeRegenRatio = Math.max(s.stormEyeRegenRatio || 0, 0.02);
+    },
+    "dust_mirage", { maps: ["desert"] }),
+
+  entry("orange", "dust_drought", "旱魃之息", "沙暴持续时间 +50%\n且沙暴期间你的全部伤害 +60%",
+    (s) => {
+      s.stormDurationMul = Math.max(s.stormDurationMul || 1, 1.5);
+      s.stormDamageMul = Math.max(s.stormDamageMul || 1, 1.6);
+    },
+    null, { maps: ["desert"] }),
+
+  // ---------- 草原专属：草丛庇护、根芽反制与入草伏击 ----------
+  entry("blue", "grass_cover", "密叶屏障", "所有草丛可多抵挡 4 发敌弹\n现存草丛与兔子新种的草丛均生效",
+    (s) => {
+      s.grassCoverCapacityBonus = (s.grassCoverCapacityBonus || 0) + 4;
+      (s.grassCover || []).forEach((cover) => {
+        cover.maxHp += 4;
+        if (cover.active) cover.hp += 4;
+      });
+    }, null, { maps: ["grassland"] }),
+
+  entry("green", "grass_regrowth", "宿根复生", "被破坏的草丛恢复时间 -40%\n14 秒缩短至 8.4 秒",
+    (s) => {
+      s.grassCoverRegenMul = (s.grassCoverRegenMul || 1) * 0.6;
+      (s.grassCover || []).forEach((cover) => { if (!cover.active) cover.regrowMs *= 0.6; });
+    }, null, { maps: ["grassland"] }),
+
+  entry("purple", "grass_ambush", "伏草一击", "每次进入草丛后，藏身期间\n首轮主炮伤害 +40%",
+    (s) => { s.grassAmbushDamageMul = 1.4; }, null, { maps: ["grassland"] }),
+
+  entry("blue", "grass_pruning", "斩芽回春", "每击毁一枚敌方根芽\n回复 3% 最大生命",
+    (s) => { s.grassBudHealRatio = 0.03; }, null, { maps: ["grassland"] }),
+
+  entry("orange", "grass_shelter", "庇护余韧", "你所在的草丛被破坏时\n获得 5% 最大生命的护盾",
+    (s) => { s.grassCoverBreakShieldRatio = 0.05; }, null, { maps: ["grassland"] }),
+
+  entry("blue", "grass_freestep", "断藤步", "免疫藤蔓缠绕与拖拽减速",
+    (s) => { s.grassSnareImmune = true; s.grassSnaredMs = 0; }, null, { maps: ["grassland"] }),
+
+  // ---------- 海洋专属：利用涨潮爆发，或将涨退潮转化为生存资源 ----------
+  entry("green", "ocean_rapid", "涨潮快射", "涨潮期间射速 +30%",
+    (s) => { s.tideFireRateMul = Math.max(s.tideFireRateMul || 1, 1.3); },
+    null, { maps: ["ocean"] }),
+
+  entry("green", "ocean_scavenger", "潮汐拾荒", "涨潮期间拾取的经验 +50%",
+    (s) => { s.tideExpMul = Math.max(s.tideExpMul || 1, 1.5); },
+    null, { maps: ["ocean"] }),
+
+  entry("blue", "ocean_stable_fin", "稳流鳍", "免疫海流推动\n你的子弹速度永久 +15%",
+    (s) => {
+      s.tideDriftMul = 0;
+      s.bulletSpeedMul = (s.bulletSpeedMul || 1) * 1.15;
+    },
+    null, { maps: ["ocean"] }),
+
+  entry("blue", "ocean_ebb_mend", "退潮回生", "每次涨潮结束，回复 6% 最大生命",
+    (s) => { s.tideEndHealRatio = Math.max(s.tideEndHealRatio || 0, 0.06); },
+    null, { maps: ["ocean"] }),
+
+  entry("purple", "ocean_coral", "珊瑚共鸣", "涨潮期间你的全部伤害 +25%",
+    (s) => { s.tideDamageMul = (s.tideDamageMul || 1) * 1.25; },
+    null, { maps: ["ocean"] }),
+
+  entry("purple", "ocean_hunter", "深海猎手", "对精英和 Boss 的伤害 +25%",
+    (s) => {
+      s.eliteDmgMul = (s.eliteDmgMul || 1) * 1.25;
+      s.bossDmgMul = (s.bossDmgMul || 1) * 1.25;
+    },
+    null, { maps: ["ocean"] }),
+
+  entry("orange", "ocean_storm_surge", "风暴潮", "涨潮期间你的全部伤害 +60%\n但敌方子弹速度也 +25%",
+    (s) => {
+      s.tideDamageMul = (s.tideDamageMul || 1) * 1.6;
+      s.tideEnemyBulletSpeedMul = Math.max(s.tideEnemyBulletSpeedMul || 1, 1.25);
+    },
+    "ocean_rapid", { maps: ["ocean"] }),
+
+  entry("orange", "ocean_heart", "潮汐之心", "每次涨潮清除全屏敌弹\n补充 20% 最大生命的护盾，不超过护盾上限",
+    (s) => {
+      s.tideHeart = true;
+      s.tideHeartShieldRatio = Math.max(s.tideHeartShieldRatio || 0, 0.2);
+      s.shieldMaxHp = Math.max(s.shieldMaxHp || 0, s.maxHp * s.tideHeartShieldRatio);
+    },
+    null, { maps: ["ocean"] }),
 
   // ---------- 复合特殊类 ----------
   entry("blue",   "mix_fire",     "火控协同",   "伤害 +8%、射速 +15%",
@@ -335,19 +527,19 @@ const UPGRADE_POOL = [
       // s.maxHp *= 1.5;
       // s.vampRate += 0.01;
     }),
-  entry("orange", "bullet_void", "虚空收割者", "弹道额外 +6，暴击率固定为95%\n但子弹伤害与射速均降低30%",
+  entry("orange", "bullet_void", "虚空收割者", "弹道额外 +4，暴击率固定为95%\n但子弹伤害与射速均降低30%",
     (s) => {
-      s.sideBullets += 6;
+      s.sideBullets = Math.min(8, s.sideBullets + 4);
       s.critRate = 0.95;
       s.bulletDamage *= 0.7;
       s.shootInterval = Math.floor(s.shootInterval * 1.3);
     }, ["ms_split_l", "pc_pierce"]),
-  entry("orange", "shield_absolute", "绝对领域", "最大生命与护盾翻倍，反伤倍率 +5\n自带范围减速与弹幕反间效果",
+  entry("orange", "shield_absolute", "绝对领域", "最大生命与护盾翻倍，反伤倍率 +3\n自带范围减速与弹幕反间效果",
     (s) => {
       s.maxHp *= 2;
       s.shieldMaxHp = Math.max(s.shieldMaxHp || 0, s.maxHp);
       s.shieldHp = Math.max(s.shieldHp || 0, s.shieldMaxHp);
-      s.thornReflectRate = (s.thornReflectRate || 0) + 5;
+      s.thornReflectRate = (s.thornReflectRate || 0) + 3;
       s.timeflowShield = true;
       s.turncoatShield = true;
       if (typeof s.turncoatShieldAccMs !== "number") s.turncoatShieldAccMs = 0;
@@ -357,13 +549,31 @@ const UPGRADE_POOL = [
 /**
  * 从可用升级里按稀有度加权抽 count 个不重复项。
  */
-/** 是否仍有至少一条可抽取的局内进化（未满额时升级面板用） */
+/**
+ * 是否仍有至少一条**不可重复**的进化可抽。
+ * 可重复词条（应急修复 / 高级重掷）永远在池里，不能拿它们判断"池已抽空"，
+ * 否则升级面板会永远弹下去。返回 false 即进入自动补给模式（见 battle.js openUpgradePanel）。
+ */
 function hasAnyUpgradeAvailable(state) {
   for (let i = 0; i < UPGRADE_POOL.length; i += 1) {
     const u = UPGRADE_POOL[i];
+    if (u.repeatable) continue;
     if (u.available(state)) return true;
   }
   return false;
+}
+
+/**
+ * 地图专属词条的权重补偿。
+ * 沙漠池 = 62 条通用 + 6 条专属，如果按同稀有度等权抽，专属条目单条出率只有 1/68，
+ * 一局下来大概率一条都见不到，等于白做。乘这个系数让它们真的能出现，
+ * 但仍受稀有度权重约束（橙的专属条目照样很稀有）。
+ */
+const MAP_EXCLUSIVE_WEIGHT_MUL = 2;
+
+function upgradeWeight(u) {
+  const base = RARITY_WEIGHTS[u.rarity] || 1;
+  return u.maps ? base * MAP_EXCLUSIVE_WEIGHT_MUL : base;
 }
 
 function pickUpgrades(state, count) {
@@ -371,11 +581,11 @@ function pickUpgrades(state, count) {
   const picked = [];
   while (arr.length > 0 && picked.length < count) {
     let total = 0;
-    arr.forEach((u) => { total += RARITY_WEIGHTS[u.rarity] || 1; });
+    arr.forEach((u) => { total += upgradeWeight(u); });
     let r = Math.random() * total;
     let idx = 0;
     for (let i = 0; i < arr.length; i += 1) {
-      r -= RARITY_WEIGHTS[arr[i].rarity] || 1;
+      r -= upgradeWeight(arr[i]);
       if (r <= 0) { idx = i; break; }
     }
     picked.push(arr[idx]);
@@ -390,6 +600,5 @@ module.exports = {
   pickUpgrades,
   hasAnyUpgradeAvailable,
   grantRunCoins,
+  effectiveCritMult,
 };
-
-
