@@ -464,15 +464,15 @@ const UPGRADE_POOL = [
       (s.hellSoulfires || []).forEach((f) => { f.fuseMs += 2000; f.fuseMaxMs += 2000; });
     }, null, { maps: ["hell"] }),
 
-  entry("green", "hell_emberhold", "余烬不熄", "业火层上限 6 → 9\n每层计时 4.0 → 5.5 秒",
-    (s) => { s.hellEmberMax = 9; s.hellEmberLifeMs = 5500; },
+  entry("green", "hell_emberhold", "余烬不熄", "业火层上限 6 → 9\n每层计时 6.0 → 9.0 秒",
+    (s) => { s.hellEmberMax = 9; s.hellEmberLifeMs = 9000; },
     null, { maps: ["hell"] }),
 
   entry("purple", "hell_quell", "镇魂爆", "每次镇魂在原地炸开\n对 90 像素内敌人造成主炮伤害 ×2.5",
     (s) => { s.hellQuellRadius = 90; s.hellQuellDamageMul = 2.5; },
     null, { maps: ["hell"] }),
 
-  entry("orange", "hell_absolution", "无罪", "业火满层时免疫一次伤害\n触发后清空全部业火层，冷却 12 秒",
+  entry("orange", "hell_absolution", "无罪", "业火满层时的抵挡不消耗层数\n且无敌时间翻倍，冷却 12 秒",
     (s) => { s.hellAbsolution = true; s.hellAbsolutionCdMs = 0; },
     null, { maps: ["hell"] }),
 

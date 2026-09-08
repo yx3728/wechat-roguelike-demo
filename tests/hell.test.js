@@ -181,6 +181,72 @@ test("镇魂加一层业火、回魂加罪值；罪值只走这两个事件", ()
   assert.equal(state.hellSin, sinBefore + h.hell.SIN_ON_RISE, "回魂升罪值");
 });
 
+test("业火护：身上有业火就抵掉一次伤害，代价是层数", () => {
+  const h = harness();
+  const M = h.hell;
+
+  function withStacks(n, extra) {
+    const state = hellState(h, extra);
+    for (let i = 0; i < n; i += 1) {
+      const fire = M.dropSoulfire(state, 175, 700, {});
+      state.player.x = fire.x - 16; state.player.y = fire.y - 18;
+      M.updateHellfire(state, 16);
+    }
+    assert.equal(state.hellEmber.length, Math.min(n, state.hellEmberMax || 6), `预置 ${n} 层`);
+    return state;
+  }
+
+  // 没有业火：挡不住
+  assert.equal(M.consumeEmberGuard(hellState(h)), 0, "没有业火时挡不住");
+  assert.equal(M.emberGuardReady(hellState(h)), false);
+
+  // **身上有业火就一定能挡**——这就是这条设计的全部意义，代价定成 1 层就是为了它
+  assert.equal(M.EMBER_GUARD_COST, 1, "代价必须是 1 层：有业火 = 能挡，玩家才读得出因果");
+  const one = withStacks(1);
+  assert.equal(M.emberGuardReady(one), true, "只有一层也要能挡");
+  assert.equal(M.consumeEmberGuard(one), M.EMBER_GUARD_IFRAME_MS, "一层足够挡一次");
+  assert.equal(one.hellEmber.length, 0, "挡完扣掉那一层");
+
+  // 扣掉正好 COST 层，并给无敌帧
+  const four = withStacks(4);
+  assert.equal(M.emberGuardReady(four), true);
+  const iframe = M.consumeEmberGuard(four);
+  assert.equal(iframe, M.EMBER_GUARD_IFRAME_MS, "抵挡应返回无敌毫秒数");
+  assert.equal(four.hellEmber.length, 4 - M.EMBER_GUARD_COST, "正好扣 COST 层，不多不少");
+  assert.ok(four.hellGuardFlashMs > 0, "要有可见反馈");
+
+  // 消耗的是**最老**的层：剩下的应该是后收的那两层（寿命更长）
+  const aged = hellState(h);
+  aged.hellEmber = [200, 400, 3900, 4000];
+  const before = aged.hellEmber.slice(M.EMBER_GUARD_COST);
+  M.consumeEmberGuard(aged);
+  assert.deepEqual(Array.from(aged.hellEmber), before, "先消耗快过期的那几层");
+
+  // 「无罪」：满层那一次白挡，不吃层数；用掉后进冷却，再挡就要付层数了
+  const full = withStacks(6, { hellAbsolution: true });
+  assert.equal(M.emberGuardReady(full), true);
+  assert.equal(M.consumeEmberGuard(full), M.EMBER_GUARD_ABSOLUTION_IFRAME_MS, "白挡的无敌帧要翻倍");
+  assert.ok(M.EMBER_GUARD_ABSOLUTION_IFRAME_MS > M.EMBER_GUARD_IFRAME_MS, "白挡必须优于普通抵挡");
+  assert.equal(full.hellEmber.length, 6, "满层白挡不该扣层数");
+  assert.ok(full.hellAbsolutionCdMs > 0, "白挡之后要进冷却");
+  assert.equal(M.consumeEmberGuard(full), M.EMBER_GUARD_IFRAME_MS, "冷却中回落成普通抵挡");
+  assert.equal(full.hellEmber.length, 6 - M.EMBER_GUARD_COST, "冷却中的抵挡照常扣层数");
+});
+
+test("业火护接在全部三条受伤路径上：敌弹、撞机、业火射线", () => {
+  // 这条锁的是接线，不是数值：漏掉任何一条都会出现"有业火却还是挨了打"
+  const src = fs.readFileSync(path.resolve(ROOT, "src/battle.js"), "utf8");
+  const guards = src.match(/tryEmberGuard\(\)/g) || [];
+  // 1 处定义 + 3 条受伤路径
+  assert.ok(guards.length >= 4, `battle.js 里只接了 ${guards.length} 处业火护`);
+  assert.ok(/业火射线[\s\S]{0,400}tryEmberGuard\(\)/.test(src)
+    || /tryEmberGuard\(\)\) return;/.test(src), "射线路径要接上");
+  assert.ok(/\(b\.dmg \|\| 0\) > 0 && tryEmberGuard\(\)/.test(src), "敌弹路径要接上");
+  assert.ok(/撞机是全场最疼的一下[\s\S]{0,120}tryEmberGuard\(\)/.test(src), "撞机路径要接上");
+  // 老接口不该再有残留
+  assert.equal(/consumeHellAbsolution/.test(src), false, "旧的 consumeHellAbsolution 应已完全替换");
+});
+
 test("业火射线：必须有预警，预警期间不位移不改锁定，同时最多两道", () => {
   const h = harness();
   const E = h.hellEnemies;

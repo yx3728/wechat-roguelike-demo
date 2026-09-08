@@ -22,10 +22,27 @@ const { W, H } = require("./config.js");
 const FUSE_MS = 4500;
 /** 镇魂判定半径；「引魂」词条把它抬到 98 */
 const BANK_RADIUS = 28;
+/**
+ * 业火护：抵消一次伤害的层数代价、给的无敌帧、HUD 闪光时长。
+ *
+ * 代价定成 1 层是量出来的：代价 2 层时"能挡"只覆盖 37.9% 的时间（实测，主动收魂火的打法），
+ * 三次里挡下一次，玩家读不出因果，就还是"收益不明显"。代价 1 层 = **身上有业火就一定能挡**，
+ * 覆盖率跳到 78%，收魂火和"这一下没扣血"之间才建立得起直接联系。
+ * 不怕太强：每层只活 4 秒攒不起来，而且要跑到魂火掉落的地方去收，本身就是风险。
+ */
+const EMBER_GUARD_COST = 1;
+const EMBER_GUARD_IFRAME_MS = 600;
+const EMBER_GUARD_ABSOLUTION_IFRAME_MS = 1200;
+const EMBER_GUARD_FLASH_MS = 340;
 /** 业火：每层增伤、层上限、每层独立寿命 */
 const EMBER_DAMAGE_PER_STACK = 0.07;
 const EMBER_MAX_STACKS = 6;
-const EMBER_LIFE_MS = 4000;
+/**
+ * 每层寿命 6 秒。4 秒时实测"身上有业火"只覆盖 22%–53%（同一种打法、不同随机局），
+ * 有没有保护全看这一局杀得快不快，玩家读不出规律。6 秒把它变成一句能记住的话：
+ * **收一团魂火 → 接下来 6 秒有一次免伤**。仍然短到攒不起来，连击表的身份没丢。
+ */
+const EMBER_LIFE_MS = 6000;
 /** 安全栏：场上魂火 / 亡魂的硬上限 */
 const SOULFIRE_CAP = 14;
 const REVENANT_CAP = 8;
@@ -163,16 +180,47 @@ function hellEmberDamageMul(state) {
   return 1 + emberStacks(state) * Math.max(0, finite(state.hellEmberPerStack, EMBER_DAMAGE_PER_STACK));
 }
 
-/** 「无罪」：满层时免疫一次伤害并清空业火。返回 true 表示这次伤害被吃掉了 */
-function consumeHellAbsolution(state) {
-  if (!state || !state.hellReady || !state.hellAbsolution) return false;
-  if (finite(state.hellAbsolutionCdMs, 0) > 0) return false;
+/**
+ * 业火护：**身上有业火就能抵消一次伤害**。这是收集魂火的主要回报——
+ * 单纯的 +7%/层 增伤玩家感觉不到，一次"这一下没扣血"才是看得见的。
+ *
+ *   基础：消耗 **1 层**，并给 600ms 无敌
+ *     —— 无敌帧很关键：否则一串密弹会在几帧里把整条业火吃干净，
+ *        一次抵挡应该盖住一波攻击，而不是一发子弹换一层。
+ *   「无罪」：**满层时的那一次抵挡不消耗层数，且无敌帧翻倍到 1200ms**，冷却 12 秒。
+ *
+ * 返回本次应给的无敌毫秒数；0 表示没挡住。
+ */
+function consumeEmberGuard(state) {
+  if (!state || !state.hellReady) return 0;
+  const stacks = emberStacks(state);
+  if (stacks <= 0) return 0;
   const max = Math.max(1, finite(state.hellEmberMax, EMBER_MAX_STACKS));
-  if (emberStacks(state) < max) return false;
-  state.hellEmber = [];
-  state.hellAbsolutionCdMs = 12000;
-  state.hellAbsolutionFlashMs = 420;
-  return true;
+
+  // 无罪：满层白挡一次，不吃层数
+  if (state.hellAbsolution && stacks >= max && finite(state.hellAbsolutionCdMs, 0) <= 0) {
+    state.hellAbsolutionCdMs = 12000;
+    state.hellAbsolutionFlashMs = 420;
+    state.hellGuardFlashMs = EMBER_GUARD_FLASH_MS;
+    state.hellGuardCount = finite(state.hellGuardCount, 0) + 1;
+    return EMBER_GUARD_ABSOLUTION_IFRAME_MS;
+  }
+
+  if (stacks < EMBER_GUARD_COST) return 0;
+  // 消耗最老的几层：它们本来也快过期了，留下的是玩家刚收的
+  state.hellEmber.splice(0, EMBER_GUARD_COST);
+  state.hellGuardFlashMs = EMBER_GUARD_FLASH_MS;
+  state.hellGuardCount = finite(state.hellGuardCount, 0) + 1;
+  return EMBER_GUARD_IFRAME_MS;
+}
+
+/** 业火护现在能不能挡（HUD 据此点亮） */
+function emberGuardReady(state) {
+  if (!state || !state.hellReady) return false;
+  const stacks = emberStacks(state);
+  const max = Math.max(1, finite(state.hellEmberMax, EMBER_MAX_STACKS));
+  if (state.hellAbsolution && stacks >= max && finite(state.hellAbsolutionCdMs, 0) <= 0) return true;
+  return stacks >= EMBER_GUARD_COST;
 }
 
 /** 「赦令」：击杀亡魂返还一层业火。仍然**不产生魂火** */
@@ -208,6 +256,7 @@ function updateHellfire(state, dt) {
 
   state.hellAbsolutionCdMs = Math.max(0, finite(state.hellAbsolutionCdMs, 0) - step);
   state.hellAbsolutionFlashMs = Math.max(0, finite(state.hellAbsolutionFlashMs, 0) - step);
+  state.hellGuardFlashMs = Math.max(0, finite(state.hellGuardFlashMs, 0) - step);
   if (state.hellBankFlash) {
     state.hellBankFlash.ms -= step;
     if (state.hellBankFlash.ms <= 0) state.hellBankFlash = null;
@@ -281,6 +330,8 @@ const hellfireRevenant = {
     hellAbsolution: false,
     hellAbsolutionCdMs: 0,
     hellAbsolutionFlashMs: 0,
+    hellGuardFlashMs: 0,
+    hellGuardCount: 0,
     hellPardon: false,
     hellSinDecayMul: 1,
   },
@@ -311,13 +362,17 @@ module.exports = {
   bankSoulfire,
   emberStacks,
   hellEmberDamageMul,
-  consumeHellAbsolution,
+  consumeEmberGuard,
+  emberGuardReady,
   onRevenantKilled,
   consumeHellRevenantRequests,
   consumeHellQuellPoints,
   FUSE_MS,
   BANK_RADIUS,
   EMBER_MAX_STACKS,
+  EMBER_GUARD_COST,
+  EMBER_GUARD_IFRAME_MS,
+  EMBER_GUARD_ABSOLUTION_IFRAME_MS,
   EMBER_LIFE_MS,
   SOULFIRE_CAP,
   REVENANT_CAP,

@@ -78,7 +78,7 @@ const { drawGrasslandTexture } = require("./grasslandTextures.js");
 const { interceptGrassBullet, grassPlayerMoveMul, consumeGrassAmbush, consumeGrasslandRewards } = require("./grasslandMechanics.js");
 const { grassDamageTakenMul } = require("./grasslandEnemies.js");
 const { drawHellBackground, drawHellEnemy, drawHellBoss, drawHellOverlay } = require("./hellVisuals.js");
-const { hellEmberDamageMul, consumeHellAbsolution, consumeHellRevenantRequests,
+const { hellEmberDamageMul, consumeEmberGuard, consumeHellRevenantRequests,
   consumeHellQuellPoints, onRevenantKilled } = require("./hellMechanics.js");
 const { createRevenant, onHellEnemyKilled, spawnSoulfireFor, updateHellBeams } = require("./hellEnemies.js");
 const { chargeWindrunner, consumeWindVolley, drawWindCharge } = require("./windrunner.js");
@@ -1207,7 +1207,7 @@ function createBattleScene(options) {
     const raw = updateHellBeams(state, dt);
     if (raw <= 0) return;
     if (state.invincibleMs > 0 || state.godMode) return;
-    if (consumeHellAbsolution(state)) return;
+    if (tryEmberGuard()) return;
 
     let dmg = Math.max(1, Math.round(raw * 300 * state.curseEnemyDmgMul));
     if (state.endlessMode) {
@@ -1228,6 +1228,20 @@ function createBattleScene(options) {
       state.gameOver = true;
       finishRun();
     }
+  }
+
+  /**
+   * 业火护：身上有业火就抵消一次伤害，并给一小段无敌帧。
+   * 三条受伤路径（敌弹 / 撞机 / 业火射线）都走这一个入口，
+   * 免得哪条漏掉之后"有业火却还是挨了打"。
+   */
+  function tryEmberGuard() {
+    if (!state.hellCfg) return false;
+    const iframe = consumeEmberGuard(state);
+    if (iframe <= 0) return false;
+    state.invincibleMs = Math.max(state.invincibleMs || 0, iframe);
+    state.shieldFlashMs = state.flashEffectsOn ? 240 : 0;
+    return true;
   }
 
   function applyGrasslandRewards() {
@@ -3160,7 +3174,7 @@ function createBattleScene(options) {
       // 暂时无敌：直接消弹不扣血；DEV 无敌同理
       if (state.invincibleMs > 0 || state.godMode) continue;
       // 「无罪」：业火满层时吃掉一次伤害并清空全部层数
-      if (state.hellCfg && (b.dmg || 0) > 0 && consumeHellAbsolution(state)) continue;
+      if ((b.dmg || 0) > 0 && tryEmberGuard()) continue;
 
       const rawBdmg = b.dmg || 0;
       let incomingBulletDmg =
@@ -3270,6 +3284,9 @@ function createBattleScene(options) {
 
       // 暂时无敌：穿过敌机不扣血（普通敌机不消失，避免一闪过去清空）；DEV 无敌同理
       if (state.invincibleMs > 0 || state.godMode) continue;
+
+      // 业火护：撞机是全场最疼的一下（2000），有业火时优先抵掉它
+      if (tryEmberGuard()) continue;
 
       // 护盾抵挡撞击（护盾承受双倍伤害）；护盾不足以吃下整次撞击时，剩余伤害穿透到生命值
       if (state.shieldHp > 0) {

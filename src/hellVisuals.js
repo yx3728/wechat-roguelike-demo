@@ -439,24 +439,39 @@ function drawHellOverlay(ctx, state, W, H) {
     ctx.restore();
   }
 
-  // 业火层数：屏幕底部一排小格，满层时整排点亮（「无罪」就绑在满层上）
+  // 业火层数：屏幕底部一排小格。
+  // 关键读数不是"有几层"，而是**现在能不能挡下一下**——所以能挡时整条框亮起来。
   const stacks = (state.hellEmber || []).length;
   const max = Math.max(1, state.hellEmberMax || 6);
   if (state.hellReady) {
+    const cost = 1;
+    const free = !!(state.hellAbsolution && stacks >= max && (state.hellAbsolutionCdMs || 0) <= 0);
+    const ready = free || stacks >= cost;
     const bw = 16, gap = 4, total = max * bw + (max - 1) * gap;
     const x0 = (W - total) / 2, y0 = H - 108;
     ctx.save();
     for (let i = 0; i < max; i += 1) {
       const on = i < stacks;
-      ctx.globalAlpha = on ? 0.9 : 0.18;
+      // 会被下一次抵挡吃掉的那几层画得更实，玩家看得出代价
+      const spent = on && !free && i < cost;
+      ctx.globalAlpha = on ? (spent ? 1 : 0.72) : 0.18;
       ctx.fillStyle = on ? SOULFIRE : "#e8e2d6";
-      ctx.fillRect(x0 + i * (bw + gap), y0, bw, 4);
+      ctx.fillRect(x0 + i * (bw + gap), y0, bw, spent ? 5 : 4);
     }
-    if (stacks >= max && state.hellAbsolution && (state.hellAbsolutionCdMs || 0) <= 0) {
-      ctx.globalAlpha = 0.75;
-      ctx.strokeStyle = "#e8e2d6";
-      ctx.lineWidth = 1.4;
-      ctx.strokeRect(x0 - 4, y0 - 4, total + 8, 12);
+    if (ready) {
+      ctx.globalAlpha = free ? 0.9 : 0.6;
+      ctx.strokeStyle = free ? "#ffffff" : SOULFIRE;
+      ctx.lineWidth = free ? 1.8 : 1.2;
+      ctx.strokeRect(x0 - 5, y0 - 5, total + 10, 14);
+    }
+    // 挡下来的那一瞬：整条炸开一圈，"这一下没扣血"要看得见
+    const flash = state.hellGuardFlashMs || 0;
+    if (flash > 0) {
+      const g = clamp(1 - flash / 340, 0, 1);
+      ctx.globalAlpha = (1 - g) * 0.9;
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2.2;
+      ctx.strokeRect(x0 - 5 - g * 12, y0 - 5 - g * 10, total + 10 + g * 24, 14 + g * 20);
     }
     ctx.restore();
   }
