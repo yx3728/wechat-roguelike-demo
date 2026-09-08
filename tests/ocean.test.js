@@ -55,7 +55,12 @@ function harness(rawSave) {
 }
 
 function battle(mapId = "ocean", debug, saveExtras) {
-  const env = harness({ selectedMapId: mapId, musicOn: false, ...saveExtras });
+  // 海洋起就要通关前一张图才解锁；这些用例测的是玩法不是解锁流程，夹具直接给通
+  const env = harness({
+    selectedMapId: mapId, musicOn: false,
+    ...saveExtras,
+    unlockedMaps: { ocean: true, ...(saveExtras || {}).unlockedMaps },
+  });
   const { CHARACTERS } = env.load("src/characters.js");
   const scene = env.load("src/battle.js").createBattleScene({
     character: CHARACTERS[0], onExit() {}, debug,
@@ -140,7 +145,7 @@ test("ocean registry references real content and each weighted spawn slot resolv
   assert.equal(elite.isElite, true);
 });
 
-test("old and new saves retain progress, gain the ocean map and resolve valid menu selections", () => {
+test("旧存档保留进度；海洋要通关星空才解锁，未解锁前既不展示也进不去", () => {
   const env = harness({ coins: 437, bestKills: 91, talents: { vitality: 2 }, unlockedMaps: { desert: true } });
   const storage = env.load("src/storage.js");
   const maps = env.load("src/maps.js");
@@ -149,17 +154,28 @@ test("old and new saves retain progress, gain the ocean map and resolve valid me
   assert.equal(save.bestKills, 91);
   assert.equal(save.talents.vitality, 2);
   assert.equal(save.unlockedMaps.desert, true);
-  assert.equal(save.unlockedMaps.ocean, true);
+
+  // 新存档：只有星空。未解锁的地图**一张都不列出来**
+  assert.equal(save.unlockedMaps.ocean, false, "海洋不该默认解锁");
+  // 数组是在 vm 上下文里造的，与宿主 realm 原型不同，deepEqual 会判不等——比字符串
+  assert.equal(maps.getVisibleMaps(save).map((m) => m.id).sort().join(","), "desert,starfield");
   assert.equal(maps.resolveSelectedMap(save).id, "starfield");
-  assert.ok(maps.getVisibleMaps(save).some((map) => map.id === "ocean"));
   storage.setSelectedMapId("ocean");
-  assert.equal(maps.resolveSelectedMap(save).id, "ocean");
-  assert.equal(env.writes.at(-1).value.selectedMapId, "ocean");
-  assert.equal(env.writes.at(-1).value.coins, 437);
+  assert.equal(maps.resolveSelectedMap(storage.get()).id, "starfield", "没解锁就选不进去");
+
+  // 通关星空之后才拿到海洋
+  const rewards = storage.recordMapClear("starfield");
+  assert.ok(rewards.maps.some((m) => m.id === "ocean"), "通关星空应解锁海洋");
+  assert.equal(storage.get().unlockedMaps.ocean, true);
+  assert.ok(maps.getVisibleMaps(storage.get()).some((m) => m.id === "ocean"));
+  storage.setSelectedMapId("ocean");
+  assert.equal(maps.resolveSelectedMap(storage.get()).id, "ocean");
+  assert.equal(env.writes.at(-1).value.coins, 437, "解锁不该动金币");
+
   assert.equal(maps.resolveSelectedMap({ selectedMapId: "missing" }).id, "starfield");
   assert.equal(maps.resolveSelectedMap({ selectedMapId: "desert" }).id, "starfield");
   const fresh = harness().load("src/storage.js").get();
-  assert.equal(fresh.unlockedMaps.ocean, true);
+  assert.equal(fresh.unlockedMaps.ocean, false);
   assert.equal(fresh.selectedMapId, "starfield");
   assert.equal(battle("ocean").state.mapId, "ocean");
   assert.equal(battle("missing").state.mapId, "starfield");

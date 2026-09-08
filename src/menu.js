@@ -385,13 +385,17 @@ function createMenuScene(options) {
       ? `${character.name} 需要兑换码解锁` : `${character.name} 需要 ${character.unlockCost} 金币解锁`);
   }
 
-  /** 菜单可见角色索引：兑换码专属角色未解锁前不展示 */
+  /**
+   * 菜单可见角色索引：**拿不到手的角色不展示**——兑换码专属、以及要通关某张地图才给的，
+   * 未解锁前都不列出来（与地图同一约定，见 maps.js getVisibleMaps）。
+   * 金币角色是例外：它们要留在列表里才买得到，未解锁时显示价格。
+   */
   function getVisibleCharacterIndices(save) {
     const s = save || storage.get();
     const arr = [];
     for (let i = 0; i < CHARACTERS.length; i += 1) {
       const c = CHARACTERS[i];
-      if (c.unlockByCodeOnly && !isUnlocked(s, c)) continue;
+      if ((c.unlockByCodeOnly || c.unlockByMap) && !isUnlocked(s, c)) continue;
       arr.push(i);
     }
     return arr;
@@ -1290,12 +1294,12 @@ function createMenuScene(options) {
     ctx.strokeRect(x, y, w, h);
   }
 
+  /** 列出来的地图**一定是已解锁的**（getVisibleMaps 过滤掉未解锁的），所以这里不画锁态 */
   function drawMapsPage(ctx, save, dx) {
     const maps = getVisibleMaps(save);
     maps.forEach((m, i) => {
       const r = getMapRect(i, dx);
       const selected = m.id === state.selectedMapId;
-      const unlocked = isMapUnlocked(save, m);
 
       // 卡片背景（选中时描边用地图主色）
       ctx.fillStyle = "#1e293b";
@@ -1316,7 +1320,7 @@ function createMenuScene(options) {
 
       ctx.font = "11px sans-serif";
       ctx.fillStyle = "#94a3b8";
-      ctx.fillText(unlocked ? m.desc : m.unlockHint, textX, r.y + 34);
+      ctx.fillText(m.desc, textX, r.y + 34);
 
       // 右上角状态徽标：使用中 / 点击选择
       const badgeW = 52;
@@ -1329,18 +1333,9 @@ function createMenuScene(options) {
       ctx.font = "bold 11px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(!unlocked ? "未解锁" : selected ? "使用中" : "选择", badgeX + badgeW / 2, badgeY + badgeH / 2);
+      ctx.fillText(selected ? "使用中" : "选择", badgeX + badgeW / 2, badgeY + badgeH / 2);
     });
 
-    // 列表底部提示：还有未解锁地图时给个方向（不剧透具体条件之外的信息）
-    if (maps.length < MAPS.length) {
-      const r = getMapRect(maps.length, dx);
-      ctx.fillStyle = "#475569";
-      ctx.font = "11px sans-serif";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "top";
-      ctx.fillText("？？？  击败隐藏 Boss 可解锁新战场", r.x + 4, r.y + 8);
-    }
   }
 
   /** DEV 面板配色（集中在这里，改主题只动这一处） */

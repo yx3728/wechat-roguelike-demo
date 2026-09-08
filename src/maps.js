@@ -17,8 +17,9 @@
  *
  * 字段说明：
  *   id / name / desc / accent      基本信息；accent 是菜单卡片选中态描边色
- *   unlockBy                       null 默认可用；"hiddenBoss" 需击败虚空线 Boss，
- *                                  解锁前**不在菜单展示**（与兑换码角色同一约定）
+ *   unlockBy                       null 默认可用；"hiddenBoss" 需击败虚空线 Boss；
+ *                                  "mapClear" + unlockMapId 需通关指定地图。
+ *                                  **未解锁的地图一律不在菜单展示**（与兑换码角色同一约定）
  *   enemyPool                      刷怪池名（enemies.js ENEMY_POOLS 的键）
  *   eliteType                      精英类型（enemies.js ELITE_FACTORIES 的键）
  *   bossVariant                    本图 Boss（enemies.js BOSS_VARIANTS 的 id）；
@@ -111,8 +112,9 @@ const MAPS = [
     name: "海洋",
     desc: "穿越珊瑚浅海，潜入归墟。涨潮横推机体，经验 +20%。",
     accent: "#5eead4",
-    unlockBy: null,
-    unlockHint: "",
+    unlockBy: "mapClear",
+    unlockMapId: "starfield",
+    unlockHint: "通关星空后解锁",
     enemyPool: "ocean",
     eliteType: "abyssalAngler",
     bossVariant: "leviathan",
@@ -140,7 +142,6 @@ const MAPS = [
     unlockBy: "mapClear",
     unlockMapId: "ocean",
     unlockHint: "通关海洋后解锁",
-    showLocked: true,
     enemyPool: "grassland",
     eliteType: "thunderBison",
     bossVariant: "antlerKing",
@@ -162,7 +163,6 @@ const MAPS = [
     unlockBy: "mapClear",
     unlockMapId: "grassland",
     unlockHint: "通关草原后解锁",
-    showLocked: true,
     enemyPool: "hell",
     eliteType: "warden",
     bossVariant: "yama",
@@ -208,9 +208,12 @@ function isMapUnlocked(save, map) {
   return !!(save && save.unlockedMaps && save.unlockedMaps[map.id]);
 }
 
-/** 菜单可见地图：需解锁的地图在解锁前不展示 */
+/**
+ * 菜单可见地图：**没解锁的一律不展示**（角色同理，见 menu.js getVisibleCharacterIndices）。
+ * 玩家在通关结算界面才知道解锁了什么，菜单里不留占位、不剧透。
+ */
 function getVisibleMaps(save) {
-  return MAPS.filter((m) => !m.unlockBy || m.showLocked || isMapUnlocked(save, m));
+  return MAPS.filter((m) => isMapUnlocked(save, m));
 }
 
 /** 存档里记着的地图；已失效或未解锁时回落到默认地图 */

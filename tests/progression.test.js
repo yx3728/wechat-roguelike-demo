@@ -43,7 +43,7 @@ function harness(rawSave) {
     draw,`);
     }
     if (filename === path.join(ROOT, "src", "menu.js")) {
-      source = source.replace(/return \{\s*update,\s*draw,/, "return { __test: { state, handleCharacterTap, handleMapTap, getMapRect, getStartRect }, update, draw,");
+      source = source.replace(/return \{\s*update,\s*draw,/, "return { __test: { state, handleCharacterTap, handleMapTap, getMapRect, getStartRect, getVisibleCharacterIndices }, update, draw,");
     }
     const mod = { exports: {} };
     cache.set(filename, mod);
@@ -58,7 +58,12 @@ function harness(rawSave) {
 }
 
 function battle(mapId = "ocean", debug, saveExtras) {
-  const env = harness({ selectedMapId: mapId, musicOn: false, ...saveExtras });
+  // 海洋起就要通关前一张图才解锁；这些用例测的是玩法不是解锁流程，夹具直接给通
+  const env = harness({
+    selectedMapId: mapId, musicOn: false,
+    ...saveExtras,
+    unlockedMaps: { ocean: true, ...(saveExtras || {}).unlockedMaps },
+  });
   const { CHARACTERS } = env.load("src/characters.js");
   const scene = env.load("src/battle.js").createBattleScene({
     character: CHARACTERS[0], onExit() {}, debug,
@@ -108,18 +113,51 @@ function hitWithMainBullet(env, enemy) {
   return before - enemy.hp;
 }
 
-test("new and old saves keep both progression characters and grassland locked", () => {
+test("新存档只看得见星空：没解锁的地图和角色一律不展示", () => {
   for (const raw of [undefined, { coins: 98765, selectedMapId: "grassland", selectedCharacterId: "windrunner" }]) {
     const env = harness(raw), storage = env.load("src/storage.js"), save = storage.get();
     const maps = env.load("src/maps.js"), chars = env.load("src/characters.js");
+    assert.equal(save.unlockedMaps.ocean, false);
     assert.equal(save.unlockedMaps.grassland, false);
     assert.equal(save.unlockedCharacters.tidecaller, false);
     assert.equal(save.unlockedCharacters.windrunner, false);
     assert.equal(maps.resolveSelectedMap(save).id, "starfield");
-    assert.ok(maps.getVisibleMaps(save).some((m) => m.id === "grassland" && m.unlockHint === "通关海洋后解锁"));
-    for (const id of ["tidecaller", "windrunner"]) assert.equal(chars.isCharacterUnlocked(save, chars.CHARACTERS.find((c) => c.id === id)), false);
+
+    // 未解锁的地图一张都不列出来——不留占位、不剧透
+    // 数组是在 vm 上下文里造的，与宿主 realm 原型不同，deepEqual 会判不等——比字符串
+    assert.equal(maps.getVisibleMaps(save).map((m) => m.id).join(","), "starfield");
+
+    for (const id of ["tidecaller", "windrunner"]) {
+      assert.equal(chars.isCharacterUnlocked(save, chars.CHARACTERS.find((c) => c.id === id)), false);
+    }
     if (raw) assert.equal(save.coins, raw.coins);
   }
+});
+
+test("通关地图才解锁角色的那两位，未解锁前不出现在角色栏；金币角色照常展示", () => {
+  const env = harness({ coins: 100000 });
+  const storage = env.load("src/storage.js");
+  const chars = env.load("src/characters.js").CHARACTERS;
+  const menu = env.load("src/menu.js").createMenuScene({ onStart() {} });
+  const visible = () => menu.__test.getVisibleCharacterIndices(storage.get()).map((i) => chars[i].id);
+
+  const before = visible();
+  assert.ok(!before.includes("tidecaller"), "潮汐使未解锁时不该展示");
+  assert.ok(!before.includes("windrunner"), "逐风者未解锁时不该展示");
+  // 兑换码角色同样不展示
+  chars.filter((c) => c.unlockByCodeOnly).forEach((c) => {
+    assert.ok(!before.includes(c.id), `${c.id} 未解锁时不该展示`);
+  });
+  // 金币角色是例外：要留在列表里才买得到
+  const paid = chars.filter((c) => c.unlockCost > 0);
+  assert.ok(paid.length > 0);
+  paid.forEach((c) => assert.ok(before.includes(c.id), `${c.id} 是金币角色，必须可见才买得到`));
+
+  storage.recordMapClear("ocean");
+  assert.ok(visible().includes("tidecaller"), "通关海洋后潮汐使才出现");
+  assert.ok(!visible().includes("windrunner"));
+  storage.recordMapClear("grassland");
+  assert.ok(visible().includes("windrunner"), "通关草原后逐风者才出现");
 });
 
 test("clear rewards persist atomically, repair recorded progress on load, repeat safely and reset", () => {
@@ -165,11 +203,18 @@ test("locked cards cannot be bought for zero coins or selected, then work after 
     menu.__test.state.selectedIndex = 0;
   }
   assert.equal(storage.get().coins, 100000);
-  const maps = env.load("src/maps.js").getVisibleMaps(storage.get());
-  const r = menu.__test.getMapRect(maps.findIndex((m) => m.id === "grassland"));
-  menu.__test.handleMapTap(r.x + 5, r.y + 5);
-  assert.equal(menu.__test.state.selectedMapId, "starfield");
+
+  // 未解锁的地图现在**根本不在列表里**，所以"点了也选不中"变成"压根点不到"
+  const mapsMod = env.load("src/maps.js");
+  const listed = () => mapsMod.getVisibleMaps(storage.get()).map((m) => m.id);
+  assert.ok(!listed().includes("grassland"), "没通关海洋时草原不该出现在列表里");
+
   storage.recordMapClear("ocean");
+  // 通关海洋后草原才出现，且此时点它能选中
+  const after = mapsMod.getVisibleMaps(storage.get());
+  const grassIndex = after.findIndex((m) => m.id === "grassland");
+  assert.ok(grassIndex >= 0, "通关海洋后草原应当出现");
+  const r = menu.__test.getMapRect(grassIndex);
   menu.__test.handleCharacterTap(tideIndex);
   assert.equal(menu.__test.state.selectedIndex, tideIndex);
   menu.__test.handleMapTap(r.x + 5, r.y + 5);

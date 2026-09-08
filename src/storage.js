@@ -48,11 +48,14 @@ const DEFAULT_SAVE = {
     gravitation: 0,
     curse: 0,
   },
-  /** 已解锁地图（见 maps.js）；星空默认可用，沙漠需击败隐藏 Boss（虚空线）*/
+  /**
+   * 已解锁地图（见 maps.js）。**只有星空默认可用**：
+   * 星空 → 海洋 → 草原 → 地狱 逐图通关解锁；沙漠另走击败隐藏 Boss（虚空线）。
+   */
   unlockedMaps: {
     starfield: true,
     desert: false,
-    ocean: true,
+    ocean: false,
     grassland: false,
     hell: false,
   },
